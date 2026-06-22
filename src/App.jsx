@@ -1,26 +1,28 @@
 import React, { useState } from 'react';
 
+// Unified Initial Data Structure
 const INITIAL_DATA = [
-  { id: 1, name: 'Special Week', link: '#', submitter: 'System', type: 'Canon', dorm: 'Ritto' },
-  { id: 2, name: 'Silence Suzuka', link: '#', submitter: 'System', type: 'Canon', dorm: 'Ritto' },
-  { id: 3, name: 'El Condor Pasa', link: '#', submitter: 'System', type: 'Canon', dorm: 'Miho' },
-  { id: 4, name: 'Shadow Racer', link: '#', submitter: 'Mod01', type: 'OC', dorm: 'Miho' },
-  { id: 5, name: 'Crimson Hoof', link: '#', submitter: 'Mod02', type: 'OC', dorm: 'Independent' }
+  { id: 1, category: 'Umamusume', type: 'Canon', dorm: 'Ritto', name: 'Special Week', submitter: 'System', link: '#', image: 'https://placehold.co/400x400/4f46e5/ffffff?text=Spe' },
+  { id: 2, category: 'Umamusume', type: 'OC', dorm: 'Miho', name: 'Shadow Racer', submitter: 'Mod01', link: '#', image: 'https://placehold.co/400x400/10b981/ffffff?text=SR' },
+  { id: 3, category: 'Trainer', team: 'Team Sirius', name: 'Trainer Aki', submitter: 'System', link: '#', image: 'https://placehold.co/400x400/f59e0b/ffffff?text=Aki' },
+  { id: 4, category: 'NPC', alignment: 'Enemy', name: 'Rival Syndicate', submitter: 'Mod02', link: '#', image: 'https://placehold.co/400x400/ef4444/ffffff?text=Rival' }
 ];
 
 export default function App() {
-  const [characters, setCharacters] = useState(INITIAL_DATA);
-  const [activeTab, setActiveTab] = useState('Canon');
+  const [entries, setEntries] = useState(INITIAL_DATA);
+  const [activeMainTab, setActiveMainTab] = useState('Umamusume');
+  const [activeUmaTab, setActiveUmaTab] = useState('Canon'); // Sub-tab for Umamusume
   
-  // Mod Form State
+  // Dynamic Form State
   const [formData, setFormData] = useState({
-    name: '',
-    link: '',
-    submitter: '',
-    type: 'Canon',
-    dorm: 'Ritto',
+    category: 'Umamusume',
+    name: '', link: '', submitter: '', image: '',
+    type: 'Canon', dorm: 'Ritto', // Uma specific
+    team: '',                     // Trainer specific
+    alignment: 'Friendly',        // NPC specific
     password: ''
   });
+  
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
@@ -31,154 +33,194 @@ export default function App() {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    setErrorMsg('');
-    setSuccessMsg('');
+    setErrorMsg(''); setSuccessMsg('');
 
-    // Security Check
     if (formData.password !== 'carrot') {
       setErrorMsg('Invalid Password of the Day.');
       return;
     }
 
-    // Create new entry
-    const newCharacter = {
+    const newEntry = {
       id: Date.now(),
-      name: formData.name,
-      link: formData.link,
-      submitter: formData.submitter,
-      type: formData.type,
-      dorm: formData.dorm
+      category: formData.category,
+      name: formData.name, link: formData.link, submitter: formData.submitter, image: formData.image,
+      ...(formData.category === 'Umamusume' && { type: formData.type, dorm: formData.dorm }),
+      ...(formData.category === 'Trainer' && { team: formData.team || 'Unaffiliated' }),
+      ...(formData.category === 'NPC' && { alignment: formData.alignment })
     };
 
-    setCharacters([...characters, newCharacter]);
+    setEntries([...entries, newEntry]);
     setSuccessMsg(`${formData.name} added to the database!`);
     
-    // Clear form fields
-    setFormData({
-      name: '', link: '', submitter: '', type: 'Canon', dorm: 'Ritto', password: ''
-    });
-    
-    // Clear success message after 3 seconds
+    // Reset core fields, keep category sticky for ease of use
+    setFormData(prev => ({ ...prev, name: '', link: '', submitter: '', image: '', team: '', password: '' }));
     setTimeout(() => setSuccessMsg(''), 3000);
   };
 
-  // Helper function to render character cards grouped by dorm
-  const renderDormGroup = (dormName, currentType) => {
-    const filteredChars = characters.filter(c => c.type === currentType && c.dorm === dormName);
-    
-    if (filteredChars.length === 0) return null;
+  // --- RENDER HELPERS ---
 
-    return (
-      <div key={dormName} className="mb-8">
-        <h3 className="text-xl font-bold border-b-2 border-slate-700 pb-2 mb-4 text-emerald-400">
-          {dormName} {dormName === 'Independent' ? '' : 'Dorm'}
-        </h3>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {filteredChars.map(char => (
-            <div key={char.id} className="bg-slate-800 border border-slate-700 p-4 rounded-lg shadow-lg hover:border-emerald-500 transition-colors">
-              <h4 className="text-lg font-bold text-white mb-1">{char.name}</h4>
-              <p className="text-sm text-slate-400 mb-4">Submitted by: <span className="text-slate-300">{char.submitter}</span></p>
-              <a 
-                href={char.link} 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="inline-block w-full text-center bg-slate-700 hover:bg-slate-600 text-white font-semibold py-2 px-4 rounded transition-colors"
-              >
-                View Sheet
-              </a>
-            </div>
-          ))}
-        </div>
+  const renderCard = (entry) => (
+    <div key={entry.id} className="bg-slate-800 border border-slate-700 rounded-lg shadow-lg overflow-hidden hover:border-emerald-500 transition-colors flex flex-col">
+      <div className="h-48 w-full bg-slate-900 flex items-center justify-center overflow-hidden">
+        {entry.image ? (
+          <img src={entry.image} alt={entry.name} className="w-full h-full object-cover object-top" onError={(e) => e.target.src = 'https://placehold.co/400x400/1e293b/ffffff?text=No+Image'} />
+        ) : (
+          <span className="text-slate-600 font-bold">No Image</span>
+        )}
       </div>
-    );
+      <div className="p-4 flex flex-col flex-grow">
+        <h4 className="text-xl font-bold text-white mb-1">{entry.name}</h4>
+        {entry.category === 'Trainer' && <p className="text-sm font-semibold text-amber-400 mb-1">{entry.team}</p>}
+        {entry.category === 'NPC' && <p className={`text-sm font-semibold mb-1 ${entry.alignment === 'Enemy' ? 'text-red-400' : 'text-blue-400'}`}>{entry.alignment} NPC</p>}
+        <p className="text-xs text-slate-400 mb-4 flex-grow">Submitted by: <span className="text-slate-300">{entry.submitter}</span></p>
+        <a href={entry.link} target="_blank" rel="noopener noreferrer" className="block w-full text-center bg-slate-700 hover:bg-slate-600 text-white font-semibold py-2 px-4 rounded transition-colors mt-auto">
+          View Sheet
+        </a>
+      </div>
+    </div>
+  );
+
+  const renderGallery = () => {
+    const categoryEntries = entries.filter(e => e.category === activeMainTab);
+
+    if (activeMainTab === 'Umamusume') {
+      const typeFiltered = categoryEntries.filter(e => e.type === activeUmaTab);
+      return (
+        <div>
+          <div className="flex mb-6 space-x-2 border-b border-slate-700 pb-2">
+            <button onClick={() => setActiveUmaTab('Canon')} className={`px-4 py-2 rounded-t font-bold transition-colors ${activeUmaTab === 'Canon' ? 'bg-slate-800 text-emerald-400 border-t border-x border-slate-700' : 'text-slate-500 hover:text-slate-300'}`}>Canon Roster</button>
+            <button onClick={() => setActiveUmaTab('OC')} className={`px-4 py-2 rounded-t font-bold transition-colors ${activeUmaTab === 'OC' ? 'bg-slate-800 text-emerald-400 border-t border-x border-slate-700' : 'text-slate-500 hover:text-slate-300'}`}>Original Characters</button>
+          </div>
+          {['Ritto', 'Miho', 'Independent'].map(dorm => {
+            const group = typeFiltered.filter(e => e.dorm === dorm);
+            if (group.length === 0) return null;
+            return (
+              <div key={dorm} className="mb-8">
+                <h3 className="text-xl font-bold border-b border-slate-700 pb-2 mb-4 text-emerald-400">{dorm} {dorm !== 'Independent' && 'Dorm'}</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">{group.map(renderCard)}</div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    if (activeMainTab === 'Trainers') {
+      // Extract unique teams and group
+      const teams = [...new Set(categoryEntries.map(e => e.team))].sort();
+      return teams.map(team => {
+        const group = categoryEntries.filter(e => e.team === team);
+        return (
+          <div key={team} className="mb-8">
+            <h3 className="text-xl font-bold border-b border-slate-700 pb-2 mb-4 text-amber-400">{team}</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">{group.map(renderCard)}</div>
+          </div>
+        );
+      });
+    }
+
+    if (activeMainTab === 'NPCs') {
+      return ['Friendly', 'Enemy'].map(align => {
+        const group = categoryEntries.filter(e => e.alignment === align);
+        if (group.length === 0) return null;
+        return (
+          <div key={align} className="mb-8">
+            <h3 className={`text-xl font-bold border-b border-slate-700 pb-2 mb-4 ${align === 'Enemy' ? 'text-red-400' : 'text-blue-400'}`}>{align} Elements</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">{group.map(renderCard)}</div>
+          </div>
+        );
+      });
+    }
   };
 
   return (
     <div className="min-h-screen p-6 font-sans">
-      <div className="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-4 gap-8">
+      <div className="max-w-[1600px] mx-auto grid grid-cols-1 lg:grid-cols-4 gap-8">
         
-        {/* LEFT COLUMN: MOD SUBMISSION PANEL */}
+        {/* LEFT COLUMN: MOD CONSOLE */}
         <div className="lg:col-span-1">
-          <div className="bg-slate-800 p-6 rounded-xl shadow-xl border border-slate-700">
-            <h2 className="text-2xl font-bold mb-6 text-white border-b border-slate-600 pb-2">Mod Console</h2>
+          <div className="bg-slate-800 p-6 rounded-xl shadow-xl border border-slate-700 sticky top-6">
+            <h2 className="text-2xl font-bold mb-6 text-white border-b border-slate-600 pb-2">Database Input</h2>
             
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
-                <label className="block text-sm text-slate-400 mb-1">Character Name</label>
-                <input type="text" name="name" value={formData.name} onChange={handleInputChange} required className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white focus:border-emerald-500 outline-none" />
+                <label className="block text-sm text-slate-400 mb-1">Entry Category</label>
+                <select name="category" value={formData.category} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white focus:border-emerald-500 outline-none font-bold text-emerald-400">
+                  <option value="Umamusume">Umamusume</option>
+                  <option value="Trainer">Trainer</option>
+                  <option value="NPC">NPC / Organization</option>
+                </select>
               </div>
 
-              <div>
-                <label className="block text-sm text-slate-400 mb-1">Google Doc Link</label>
-                <input type="url" name="link" value={formData.link} onChange={handleInputChange} required className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white focus:border-emerald-500 outline-none" />
+              {/* DYNAMIC FIELDS */}
+              <div className="p-4 bg-slate-900/50 rounded border border-slate-700/50">
+                {formData.category === 'Umamusume' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">Type</label>
+                      <select name="type" value={formData.type} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-sm text-white">
+                        <option value="Canon">Canon</option>
+                        <option value="OC">OC</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-slate-400 mb-1">Dormitory</label>
+                      <select name="dorm" value={formData.dorm} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-sm text-white">
+                        <option value="Ritto">Ritto</option>
+                        <option value="Miho">Miho</option>
+                        <option value="Independent">Independent</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
+                {formData.category === 'Trainer' && (
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Team Name</label>
+                    <input type="text" name="team" placeholder="e.g. Team Sirius" value={formData.team} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-sm text-white" />
+                  </div>
+                )}
+                {formData.category === 'NPC' && (
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Alignment</label>
+                    <select name="alignment" value={formData.alignment} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-sm text-white">
+                      <option value="Friendly">Friendly / Ally</option>
+                      <option value="Enemy">Enemy / Rival</option>
+                    </select>
+                  </div>
+                )}
               </div>
 
-              <div>
-                <label className="block text-sm text-slate-400 mb-1">Discord Submitter</label>
-                <input type="text" name="submitter" value={formData.submitter} onChange={handleInputChange} required className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white focus:border-emerald-500 outline-none" />
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">Type</label>
-                  <select name="type" value={formData.type} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white focus:border-emerald-500 outline-none">
-                    <option value="Canon">Canon</option>
-                    <option value="OC">OC</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">Dormitory</label>
-                  <select name="dorm" value={formData.dorm} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white focus:border-emerald-500 outline-none">
-                    <option value="Ritto">Ritto</option>
-                    <option value="Miho">Miho</option>
-                    <option value="Independent">Independent</option>
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-sm text-slate-400 mb-1 mt-4">Password of the Day</label>
-                <input type="password" name="password" value={formData.password} onChange={handleInputChange} required className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white focus:border-emerald-500 outline-none" />
-              </div>
+              {/* UNIVERSAL FIELDS */}
+              <div><label className="block text-sm text-slate-400 mb-1">Name</label><input type="text" name="name" value={formData.name} onChange={handleInputChange} required className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white" /></div>
+              <div><label className="block text-sm text-slate-400 mb-1">Image URL <span className="text-xs">(Discord/Imgur link)</span></label><input type="url" name="image" placeholder="https://..." value={formData.image} onChange={handleInputChange} className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white" /></div>
+              <div><label className="block text-sm text-slate-400 mb-1">Google Doc Link</label><input type="url" name="link" value={formData.link} onChange={handleInputChange} required className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white" /></div>
+              <div><label className="block text-sm text-slate-400 mb-1">Discord Submitter</label><input type="text" name="submitter" value={formData.submitter} onChange={handleInputChange} required className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white" /></div>
+              <div className="pt-4 border-t border-slate-700"><label className="block text-sm text-slate-400 mb-1">Password of the Day</label><input type="password" name="password" value={formData.password} onChange={handleInputChange} required className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-white focus:border-red-500 outline-none" /></div>
 
               {errorMsg && <p className="text-red-400 text-sm mt-2">{errorMsg}</p>}
               {successMsg && <p className="text-emerald-400 text-sm mt-2">{successMsg}</p>}
 
-              <button type="submit" className="w-full mt-6 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-4 rounded transition-colors shadow-lg">
-                Submit to Database
-              </button>
+              <button type="submit" className="w-full mt-6 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 px-4 rounded transition-colors shadow-lg">Submit to Database</button>
             </form>
           </div>
         </div>
 
-        {/* RIGHT COLUMN: DATABASE VIEWER */}
+        {/* RIGHT COLUMN: MAIN GALLERY */}
         <div className="lg:col-span-3">
-          <div className="bg-slate-800 rounded-xl shadow-xl border border-slate-700 overflow-hidden">
+          <div className="bg-slate-800 rounded-xl shadow-xl border border-slate-700 min-h-[800px]">
             
-            {/* Header / Tabs */}
-            <div className="flex bg-slate-900 border-b border-slate-700">
-              <button 
-                onClick={() => setActiveTab('Canon')}
-                className={`flex-1 py-4 text-lg font-bold transition-colors ${activeTab === 'Canon' ? 'text-emerald-400 border-b-2 border-emerald-400 bg-slate-800' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}
-              >
-                Canon Roster
-              </button>
-              <button 
-                onClick={() => setActiveTab('OC')}
-                className={`flex-1 py-4 text-lg font-bold transition-colors ${activeTab === 'OC' ? 'text-emerald-400 border-b-2 border-emerald-400 bg-slate-800' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}
-              >
-                Original Characters
-              </button>
+            {/* Main Category Tabs */}
+            <div className="flex bg-slate-900 border-b-2 border-slate-700 rounded-t-xl overflow-hidden">
+              <button onClick={() => setActiveMainTab('Umamusume')} className={`flex-1 py-4 text-lg font-bold transition-colors ${activeMainTab === 'Umamusume' ? 'text-emerald-400 bg-slate-800' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>🐴 Umamusume Roster</button>
+              <button onClick={() => setActiveMainTab('Trainers')} className={`flex-1 py-4 text-lg font-bold transition-colors border-l border-slate-700 ${activeMainTab === 'Trainers' ? 'text-amber-400 bg-slate-800' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>📋 Trainers & Teams</button>
+              <button onClick={() => setActiveMainTab('NPCs')} className={`flex-1 py-4 text-lg font-bold transition-colors border-l border-slate-700 ${activeMainTab === 'NPCs' ? 'text-blue-400 bg-slate-800' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}>🌍 NPCs & Rivals</button>
             </div>
 
-            {/* Content Area */}
+            {/* Gallery Area */}
             <div className="p-6">
-              {['Ritto', 'Miho', 'Independent'].map(dorm => renderDormGroup(dorm, activeTab))}
-              
-              {characters.filter(c => c.type === activeTab).length === 0 && (
-                <div className="text-center py-12 text-slate-500">
-                  <p className="text-xl">No characters found in this category.</p>
-                </div>
+              {renderGallery()}
+              {entries.filter(e => e.category === activeMainTab).length === 0 && (
+                <div className="text-center py-20 text-slate-500"><p className="text-xl font-semibold">No data found for this category.</p></div>
               )}
             </div>
 
