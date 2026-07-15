@@ -3,5 +3,5 @@ import react from '@vitejs/plugin-react' // or '@vitejs/react-refresh'
 
 export default defineConfig({
   plugins: [react()],
-  base: '/umabase/', // 👈 MAKE SURE THIS HAS SLASHES ON BOTH SIDES
+  base: 'https://github.com/Kenscoder/umabase', // 👈 MAKE SURE THIS HAS SLASHES ON BOTH SIDES
 })
