@@ -1,7 +1,8 @@
 import { defineConfig } from 'vite'
-import react from '@vitejs/react-refresh' // or '@vitejs/plugin-react'
+import react from '@vitejs/plugin-react'
 
+// https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
-  base: '/umabase/', // 👈 ADD THIS LINE EXACTLY (with the slashes!)
+  base: '/umabase/', // MUST MATCH YOUR REPO NAME EXACTLY
 })
