@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import ggLogo from './assets/GG_logo.png';
+import umautoImg from './assets/umauto.jpg';
 
 // --- SUPABASE CLIENT CONFIGURATION ---
 const SUPABASE_URL = 'https://bhknqvfgchhnklogsvoq.supabase.co'; 
@@ -17,7 +18,6 @@ const TrashIcon = () => (
 );
 
 // --- PASSWORD GENERATOR ---
-// --- PASSWORD GENERATOR ---
 const generateDailyPassword = () => {
     // We lock the React app to the exact same timezone as the Discord bot
     // Now they will ALWAYS generate the exact same password without needing to share files!
@@ -32,8 +32,6 @@ const generateDailyPassword = () => {
 };
 
 export default function App() {
-  const currentDailyPassword = generateDailyPassword();
-
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activeMainTab, setActiveMainTab] = useState('Umamusume');
@@ -127,6 +125,8 @@ export default function App() {
   };
 
   const confirmDelete = async () => {
+    const currentDailyPassword = generateDailyPassword();
+
     if (deleteModal.password !== currentDailyPassword) {
       setDeleteModal(prev => ({ ...prev, error: 'Invalid Password of the Day.' }));
       return;
@@ -155,6 +155,8 @@ export default function App() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setErrorMsg(''); setSuccessMsg('');
+
+    const currentDailyPassword = generateDailyPassword();
 
     if (formData.password !== currentDailyPassword) {
       setErrorMsg('Invalid Password of the Day.');
@@ -445,9 +447,9 @@ export default function App() {
               {editingId ? 'Edit Entry' : 'Database Input'}
             </h2>
             
-            <div className="mb-6 p-3 bg-blue-50 border border-blue-200 rounded text-xs text-blue-800 font-medium shadow-inner">
-                <span className="font-bold block mb-1">🤖 Discord Bot Mock</span> 
-                The password for today is <span className="font-mono font-bold bg-blue-200 px-1 rounded inline-block mx-1 shadow-sm">{currentDailyPassword}</span>
+            <div className="mb-6 p-3 bg-blue-50 border border-blue-200 rounded flex items-center gap-3 shadow-inner">
+                <img src={umautoImg} alt="Welcome Mascot" className="w-10 h-10 object-contain shrink-0 rounded" />
+                <span className="font-bold text-sm text-blue-800">Welcome to Grand Gallop's Mastersheet, Have a nice read!</span>
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-4">
