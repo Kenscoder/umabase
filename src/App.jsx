@@ -3,8 +3,8 @@ import { createClient } from '@supabase/supabase-js';
 import ggLogo from './assets/GG_logo.png';
 
 // --- SUPABASE CLIENT CONFIGURATION ---
-const SUPABASE_URL = 'http://127.0.0.1:54321'; 
-const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH';
+const SUPABASE_URL = 'https://bhknqvfgchhnklogsvoq.supabase.co'; 
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_w4v6rE6JD85riM6KMr2SFg_BlGAugtC';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
