@@ -63,7 +63,8 @@ export default function App() {
 
   // --- 1. FETCH AVAILABLE TEAMS (For Dropdowns) ---
   const fetchTeamsList = async () => {
-    const { data } = await supabase.from('teams').select('name').order('name', { ascending: true });
+    const { data, error } = await supabase.from('teams').select('name').order('name', { ascending: true });
+    if (error) console.error('fetchTeamsList error:', error.message, error);
     if (data) setAvailableTeams(data.map(t => t.name));
   };
 
@@ -125,7 +126,8 @@ export default function App() {
         
         } else if (activeMainTab === 'Teams') {
           // Pull all teams so the sidebar menu populates correctly
-          const { data } = await supabase.from('teams').select('*').order('created_at', { ascending: false });
+          const { data, error } = await supabase.from('teams').select('*').order('created_at', { ascending: false });
+          if (error) console.error('Teams fetch error:', error.message, error);
           newEntries = (data || []).map(e => ({ ...e, ui_id: `team-${e.id}`, _table: 'teams', category: 'Team' }));
           
           // Auto-select the first team if none is selected yet
@@ -134,7 +136,8 @@ export default function App() {
           }
         
         } else if (activeMainTab === 'Trainer') {
-          const { data } = await supabase.from('trainers').select('*').range(from, to).order('created_at', { ascending: false });
+          const { data, error } = await supabase.from('trainers').select('*').range(from, to).order('created_at', { ascending: false });
+          if (error) console.error('Trainer fetch error:', error.message, error);
           newEntries = (data || []).map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position }));
         
         } else if (activeMainTab === 'NPC') {
@@ -178,6 +181,8 @@ export default function App() {
           supabase.from('characters').select('*').eq('team_name', selectedTeam.name),
           supabase.from('trainers').select('*').eq('team_name', selectedTeam.name)
         ]);
+        if (cRes.error) console.error('Team members (characters) fetch error:', cRes.error.message, cRes.error);
+        if (tRes.error) console.error('Team members (trainers) fetch error:', tRes.error.message, tRes.error);
         
         setTeamMembers({
           head: (tRes.data || []).filter(t => t.position === 'Head Trainer').map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position })),
