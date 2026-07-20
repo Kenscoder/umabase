@@ -126,7 +126,7 @@ export default function App() {
         
         } else if (activeMainTab === 'Teams') {
           // Pull all teams so the sidebar menu populates correctly
-          const { data, error } = await supabase.from('teams').select('*').order('created_at', { ascending: false });
+          const { data, error } = await supabase.from('teams').select('*').order('id', { ascending: false });
           if (error) console.error('Teams fetch error:', error.message, error);
           newEntries = (data || []).map(e => ({ ...e, ui_id: `team-${e.id}`, _table: 'teams', category: 'Team' }));
           
@@ -136,7 +136,7 @@ export default function App() {
           }
         
         } else if (activeMainTab === 'Trainer') {
-          const { data, error } = await supabase.from('trainers').select('*').range(from, to).order('created_at', { ascending: false });
+          const { data, error } = await supabase.from('trainers').select('*').range(from, to).order('id', { ascending: false });
           if (error) console.error('Trainer fetch error:', error.message, error);
           newEntries = (data || []).map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position }));
         
