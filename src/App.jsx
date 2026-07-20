@@ -58,15 +58,21 @@ export default function App() {
   const fetchEntries = async () => {
     setLoading(true);
     try {
-      const [charsRes, teamsRes, trainersRes, npcsRes, rivalsRes] = await Promise.all([
-        supabase.from('characters').select('*'),
-        supabase.from('teams').select('*'),
-        supabase.from('trainers').select('*'),
-        supabase.from('npcs').select('*'),
-        supabase.from('rivals').select('*')
-      ]);
-
+      // ✅ FIX: Fetching sequentially prevents Postgres statement timeouts caused by large Base64 payloads
+      const charsRes = await supabase.from('characters').select('*');
       if (charsRes.error) throw charsRes.error;
+
+      const teamsRes = await supabase.from('teams').select('*');
+      if (teamsRes.error) throw teamsRes.error;
+
+      const trainersRes = await supabase.from('trainers').select('*');
+      if (trainersRes.error) throw trainersRes.error;
+
+      const npcsRes = await supabase.from('npcs').select('*');
+      if (npcsRes.error) throw npcsRes.error;
+
+      const rivalsRes = await supabase.from('rivals').select('*');
+      if (rivalsRes.error) throw rivalsRes.error;
 
       // Notice the fallback to 'Unassigned' if data is missing
       const unified = [
