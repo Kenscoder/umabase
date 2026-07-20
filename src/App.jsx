@@ -72,6 +72,7 @@ export default function App() {
   }, []);
 
   // --- 2. LAZY LOAD DATA (Tabs, Pagination, & Search) ---
+  // --- 2. LAZY LOAD DATA (Tabs, Pagination, & Search) ---
   const loadData = async (isReset = false) => {
     if (loading && !isReset) return;
     setLoading(true);
@@ -88,10 +89,10 @@ export default function App() {
         if (!searchQuery.trim()) {
           setEntries([]);
           setHasMore(false);
+          setLoading(false);
           return;
         }
         
-        // Fuzzy search across all tables simultaneously
         const s = `%${searchQuery}%`;
         const [c, t, tr, n, r] = await Promise.all([
           supabase.from('characters').select('*').ilike('name', s).limit(15),
@@ -110,22 +111,34 @@ export default function App() {
         ].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
 
         setEntries(newEntries);
-        setHasMore(false); // Search fetches all relevant at once, no scroll pagination needed
+        setHasMore(false);
         
       } else {
-        // Tab-Based Paginated Fetching
         if (activeMainTab === 'Umamusume') {
-          const { data } = await supabase.from('characters').select('*').eq('type', activeUmaTab).range(from, to).order('created_at', { ascending: false });
+          let query = supabase.from('characters').select('*');
+          
+          // Properly handle filtering for Canon, OC, and Unassigned/null types
+          if (activeUmaTab === 'Unassigned') {
+            query = query.or('type.is.null,type.eq.Unassigned');
+          } else {
+            query = query.eq('type', activeUmaTab);
+          }
+
+          const { data } = await query.range(from, to).order('created_at', { ascending: false });
           newEntries = (data || []).map(e => ({ ...e, ui_id: `char-${e.id}`, _table: 'characters', category: 'Umamusume', trainer: e.trainer_name, team: e.team_name, type: e.type || 'Unassigned', dorm: e.dorm || 'Unassigned' }));
+        
         } else if (activeMainTab === 'Teams') {
           const { data } = await supabase.from('teams').select('*').range(from, to).order('created_at', { ascending: false });
           newEntries = (data || []).map(e => ({ ...e, ui_id: `team-${e.id}`, _table: 'teams', category: 'Team' }));
+        
         } else if (activeMainTab === 'Trainer') {
           const { data } = await supabase.from('trainers').select('*').range(from, to).order('created_at', { ascending: false });
           newEntries = (data || []).map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position }));
+        
         } else if (activeMainTab === 'NPC') {
           const { data } = await supabase.from('npcs').select('*').range(from, to).order('created_at', { ascending: false });
           newEntries = (data || []).map(e => ({ ...e, ui_id: `npc-${e.id}`, _table: 'npcs', category: 'NPC' }));
+        
         } else if (activeMainTab === 'Rival') {
           const { data } = await supabase.from('rivals').select('*').range(from, to).order('created_at', { ascending: false });
           newEntries = (data || []).map(e => ({ ...e, ui_id: `riv-${e.id}`, _table: 'rivals', category: 'Rival' }));
@@ -142,7 +155,6 @@ export default function App() {
       setLoading(false);
     }
   };
-
   // Trigger reset load when tabs change
   useEffect(() => {
     if (activeMainTab !== 'Search') {
