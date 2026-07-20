@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import ggLogo from './assets/GG_logo.png';
 import umautoImg from './assets/umauto.jpg';
@@ -19,94 +19,197 @@ const TrashIcon = () => (
 
 // --- PASSWORD GENERATOR ---
 const generateDailyPassword = () => {
-    // We lock the React app to the exact same timezone as the Discord bot
-    // Now they will ALWAYS generate the exact same password without needing to share files!
     const localTimeString = new Date().toLocaleString("en-US", { timeZone: "Asia/Makassar" });
     const date = new Date(localTimeString);
-    
     const seed = (date.getFullYear() * 10000) + ((date.getMonth() + 1) * 100) + date.getDate();
     const words = ['Carrot', 'Derby', 'Turf', 'Paca', 'Aoharu', 'URA', 'Spica', 'Sirius', 'G1'];
-    const word = words[seed % words.length];
-    
-    return `${word}${seed % 99}`;
+    return `${words[seed % words.length]}${seed % 99}`;
 };
 
 export default function App() {
+  // --- STATE MANAGEMENT ---
   const [entries, setEntries] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
+  
+  // Tabs & Views
   const [activeMainTab, setActiveMainTab] = useState('Umamusume');
   const [activeUmaTab, setActiveUmaTab] = useState('Canon'); 
   const [selectedTeamId, setSelectedTeamId] = useState(null);
   
+  // Infinite Scroll Pagination
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const PAGE_SIZE = 50;
+  
+  // Search
+  const [searchQuery, setSearchQuery] = useState('');
+  
+  // Relational Data
+  const [availableTeams, setAvailableTeams] = useState([]);
+  const [teamMembers, setTeamMembers] = useState({ head: [], assistant: [], trainees: [] });
+
+  // Form & Modals
   const [editingId, setEditingId] = useState(null); 
   const [deleteModal, setDeleteModal] = useState({ isOpen: false, entryId: null, dbTable: null, ui_id: null, password: '', error: '' });
+  const [errorMsg, setErrorMsg] = useState('');
+  const [successMsg, setSuccessMsg] = useState('');
   
   const [formData, setFormData] = useState({
     category: 'Umamusume',
     name: '', link: '', submitter: '', imageBase64: '',
     type: 'Canon', dorm: 'Ritto', trainer: '', roommate: '', team: '',
-    trainerRole: 'Head Trainer', season: '',
-    password: ''
+    trainerRole: 'Head Trainer', season: '', password: ''
   });
-  
-  const [errorMsg, setErrorMsg] = useState('');
-  const [successMsg, setSuccessMsg] = useState('');
 
-  const availableTeams = entries.filter(e => e.category === 'Team').map(e => e.name);
+  // --- 1. FETCH AVAILABLE TEAMS (For Dropdowns) ---
+  const fetchTeamsList = async () => {
+    const { data } = await supabase.from('teams').select('name').order('name', { ascending: true });
+    if (data) setAvailableTeams(data.map(t => t.name));
+  };
 
-  // --- 1. FETCH DATA ---
-  const fetchEntries = async () => {
+  useEffect(() => {
+    fetchTeamsList();
+  }, []);
+
+  // --- 2. LAZY LOAD DATA (Tabs, Pagination, & Search) ---
+  const loadData = async (isReset = false) => {
+    if (loading && !isReset) return;
     setLoading(true);
+    
+    const currentPage = isReset ? 0 : page;
+    const from = currentPage * PAGE_SIZE;
+    const to = from + PAGE_SIZE - 1;
+
     try {
-      // ✅ FIX: Fetching sequentially prevents Postgres statement timeouts caused by large Base64 payloads
-      const charsRes = await supabase.from('characters').select('*');
-      if (charsRes.error) throw charsRes.error;
+      let newEntries = [];
+      let fetchCount = 0;
 
-      const teamsRes = await supabase.from('teams').select('*');
-      if (teamsRes.error) throw teamsRes.error;
+      if (activeMainTab === 'Search') {
+        if (!searchQuery.trim()) {
+          setEntries([]);
+          setHasMore(false);
+          return;
+        }
+        
+        // Fuzzy search across all tables simultaneously
+        const s = `%${searchQuery}%`;
+        const [c, t, tr, n, r] = await Promise.all([
+          supabase.from('characters').select('*').ilike('name', s).limit(15),
+          supabase.from('teams').select('*').ilike('name', s).limit(15),
+          supabase.from('trainers').select('*').ilike('name', s).limit(15),
+          supabase.from('npcs').select('*').ilike('name', s).limit(15),
+          supabase.from('rivals').select('*').ilike('name', s).limit(15)
+        ]);
 
-      const trainersRes = await supabase.from('trainers').select('*');
-      if (trainersRes.error) throw trainersRes.error;
+        newEntries = [
+          ...(c.data || []).map(e => ({ ...e, ui_id: `char-${e.id}`, _table: 'characters', category: 'Umamusume', trainer: e.trainer_name, team: e.team_name, type: e.type || 'Unassigned', dorm: e.dorm || 'Unassigned' })),
+          ...(t.data || []).map(e => ({ ...e, ui_id: `team-${e.id}`, _table: 'teams', category: 'Team' })),
+          ...(tr.data || []).map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position })),
+          ...(n.data || []).map(e => ({ ...e, ui_id: `npc-${e.id}`, _table: 'npcs', category: 'NPC' })),
+          ...(r.data || []).map(e => ({ ...e, ui_id: `riv-${e.id}`, _table: 'rivals', category: 'Rival' }))
+        ].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
 
-      const npcsRes = await supabase.from('npcs').select('*');
-      if (npcsRes.error) throw npcsRes.error;
+        setEntries(newEntries);
+        setHasMore(false); // Search fetches all relevant at once, no scroll pagination needed
+        
+      } else {
+        // Tab-Based Paginated Fetching
+        if (activeMainTab === 'Umamusume') {
+          const { data } = await supabase.from('characters').select('*').eq('type', activeUmaTab).range(from, to).order('created_at', { ascending: false });
+          newEntries = (data || []).map(e => ({ ...e, ui_id: `char-${e.id}`, _table: 'characters', category: 'Umamusume', trainer: e.trainer_name, team: e.team_name, type: e.type || 'Unassigned', dorm: e.dorm || 'Unassigned' }));
+        } else if (activeMainTab === 'Teams') {
+          const { data } = await supabase.from('teams').select('*').range(from, to).order('created_at', { ascending: false });
+          newEntries = (data || []).map(e => ({ ...e, ui_id: `team-${e.id}`, _table: 'teams', category: 'Team' }));
+        } else if (activeMainTab === 'Trainer') {
+          const { data } = await supabase.from('trainers').select('*').range(from, to).order('created_at', { ascending: false });
+          newEntries = (data || []).map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position }));
+        } else if (activeMainTab === 'NPC') {
+          const { data } = await supabase.from('npcs').select('*').range(from, to).order('created_at', { ascending: false });
+          newEntries = (data || []).map(e => ({ ...e, ui_id: `npc-${e.id}`, _table: 'npcs', category: 'NPC' }));
+        } else if (activeMainTab === 'Rival') {
+          const { data } = await supabase.from('rivals').select('*').range(from, to).order('created_at', { ascending: false });
+          newEntries = (data || []).map(e => ({ ...e, ui_id: `riv-${e.id}`, _table: 'rivals', category: 'Rival' }));
+        }
 
-      const rivalsRes = await supabase.from('rivals').select('*');
-      if (rivalsRes.error) throw rivalsRes.error;
-
-      // Notice the fallback to 'Unassigned' if data is missing
-      const unified = [
-        ...(charsRes.data || []).map(e => ({ ...e, ui_id: `char-${e.id}`, _table: 'characters', category: 'Umamusume', trainer: e.trainer_name, team: e.team_name, type: e.type || 'Unassigned', dorm: e.dorm || 'Unassigned' })),
-        ...(teamsRes.data || []).map(e => ({ ...e, ui_id: `team-${e.id}`, _table: 'teams', category: 'Team' })),
-        ...(trainersRes.data || []).map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position })),
-        ...(npcsRes.data || []).map(e => ({ ...e, ui_id: `npc-${e.id}`, _table: 'npcs', category: 'NPC' })),
-        ...(rivalsRes.data || []).map(e => ({ ...e, ui_id: `riv-${e.id}`, _table: 'rivals', category: 'Rival' }))
-      ].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
-
-      setEntries(unified);
+        fetchCount = newEntries.length;
+        setEntries(prev => isReset ? newEntries : [...prev, ...newEntries]);
+        setHasMore(fetchCount === PAGE_SIZE);
+        setPage(currentPage + 1);
+      }
     } catch (err) {
-      console.error('Error fetching data from Supabase:', err.message);
-      setErrorMsg('Failed to fetch data from live database.');
+      console.error('Fetch Error:', err.message);
     } finally {
       setLoading(false);
     }
   };
 
+  // Trigger reset load when tabs change
   useEffect(() => {
-    fetchEntries();
-  }, []);
+    if (activeMainTab !== 'Search') {
+      loadData(true);
+    } else {
+      setEntries([]); // Clear for fresh search
+    }
+  }, [activeMainTab, activeUmaTab]);
 
+  // --- 3. FETCH SPECIFIC TEAM MEMBERS ---
+  useEffect(() => {
+    const fetchTeamMembers = async () => {
+      if (activeMainTab === 'Teams' && selectedTeamId) {
+        const selectedTeam = entries.find(e => e.ui_id === selectedTeamId);
+        if (!selectedTeam) return;
+        
+        const [cRes, tRes] = await Promise.all([
+          supabase.from('characters').select('*').eq('team_name', selectedTeam.name),
+          supabase.from('trainers').select('*').eq('team_name', selectedTeam.name)
+        ]);
+        
+        setTeamMembers({
+          head: (tRes.data || []).filter(t => t.position === 'Head Trainer').map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position })),
+          assistant: (tRes.data || []).filter(t => t.position === 'Assistant Trainer').map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position })),
+          trainees: (cRes.data || []).map(e => ({ ...e, ui_id: `char-${e.id}`, _table: 'characters', category: 'Umamusume', trainer: e.trainer_name, team: e.team_name, type: e.type || 'Unassigned', dorm: e.dorm || 'Unassigned' }))
+        });
+      }
+    };
+    fetchTeamMembers();
+  }, [selectedTeamId, activeMainTab, entries]);
+
+  // --- 4. INFINITE SCROLL LISTENER ---
+  const handleScroll = (e) => {
+    const { scrollTop, clientHeight, scrollHeight } = e.currentTarget;
+    // Load more when user scrolls within 50px of the bottom
+    if (scrollHeight - scrollTop <= clientHeight + 50) {
+      if (hasMore && !loading && activeMainTab !== 'Search') {
+        loadData(false);
+      }
+    }
+  };
+
+  // --- 5. FORM & DATABASE OPERATIONS ---
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     setFormData(prev => ({ ...prev, [name]: value }));
   };
 
-  const handleImageUpload = (e) => {
+  const handleImageUpload = async (e) => {
     const file = e.target.files[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => setFormData(prev => ({ ...prev, imageBase64: reader.result }));
-      reader.readAsDataURL(file);
+    if (!file) return;
+
+    try {
+      // Create a unique file name and upload to the Storage Bucket
+      const fileExt = file.name.split('.').pop();
+      const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`;
+      const filePath = `public/${fileName}`;
+
+      const { error: uploadError } = await supabase.storage.from('images').upload(filePath, file);
+      if (uploadError) throw uploadError;
+
+      // Grab the clean public URL and save it to the form
+      const { data: urlData } = supabase.storage.from('images').getPublicUrl(filePath);
+      setFormData(prev => ({ ...prev, imageBase64: urlData.publicUrl }));
+    } catch (err) {
+      console.error('Error uploading to bucket:', err.message);
+      setErrorMsg(`Failed to upload image: ${err.message}`);
     }
   };
 
@@ -131,40 +234,30 @@ export default function App() {
   };
 
   const confirmDelete = async () => {
-    const currentDailyPassword = generateDailyPassword();
-
-    if (deleteModal.password !== currentDailyPassword) {
+    if (deleteModal.password !== generateDailyPassword()) {
       setDeleteModal(prev => ({ ...prev, error: 'Invalid Password of the Day.' }));
       return;
     }
-
     try {
-      const { error } = await supabase
-        .from(deleteModal.dbTable)
-        .delete()
-        .eq('id', deleteModal.entryId);
-
+      const { error } = await supabase.from(deleteModal.dbTable).delete().eq('id', deleteModal.entryId);
       if (error) throw error;
-
+      
       setEntries(entries.filter(e => e.ui_id !== deleteModal.ui_id));
       if (selectedTeamId === deleteModal.ui_id) setSelectedTeamId(null);
       setDeleteModal({ isOpen: false, entryId: null, dbTable: null, ui_id: null, password: '', error: '' });
-      setSuccessMsg('Entry deleted from database successfully.');
+      setSuccessMsg('Entry deleted successfully.');
       setTimeout(() => setSuccessMsg(''), 3000);
+      if (deleteModal.dbTable === 'teams') fetchTeamsList();
     } catch (err) {
-      console.error('Error deleting from database:', err.message);
       setDeleteModal(prev => ({ ...prev, error: 'Failed to delete row from database.' }));
     }
   };
 
-  // --- 3. MULTI-TABLE INSERT / UPDATE ---
   const handleSubmit = async (e) => {
     e.preventDefault();
     setErrorMsg(''); setSuccessMsg('');
 
-    const currentDailyPassword = generateDailyPassword();
-
-    if (formData.password !== currentDailyPassword) {
+    if (formData.password !== generateDailyPassword()) {
       setErrorMsg('Invalid Password of the Day.');
       return;
     }
@@ -193,44 +286,35 @@ export default function App() {
         targetTable = 'rivals';
         dbPayload = { name: formData.name, season: formData.season || 'General', image: formData.imageBase64, link: formData.link };
         break;
-      default:
-        break;
+      default: break;
     }
 
     try {
       if (editingId) {
         const existingEntry = entries.find(e => e.ui_id === editingId);
-        const { error } = await supabase
-          .from(existingEntry._table)
-          .update(dbPayload)
-          .eq('id', existingEntry.id);
-
+        const { error } = await supabase.from(existingEntry._table).update(dbPayload).eq('id', existingEntry.id);
         if (error) throw error;
-        
-        await fetchEntries();
-        setSuccessMsg('Entry updated successfully inside database!');
+        setSuccessMsg('Entry updated successfully!');
         setEditingId(null);
       } else {
-        const { data, error } = await supabase
-          .from(targetTable)
-          .insert([dbPayload])
-          .select();
-
+        const { error } = await supabase.from(targetTable).insert([dbPayload]).select();
         if (error) throw error;
-        await fetchEntries();
-        setSuccessMsg(`${formData.name} added directly to database!`);
+        setSuccessMsg(`${formData.name} added to database!`);
       }
 
       setFormData(prev => ({ ...prev, name: '', link: '', submitter: '', imageBase64: '', trainer: '', roommate: '', team: '', season: '', password: '' }));
       const fileInput = document.getElementById('file-upload');
       if (fileInput) fileInput.value = '';
       setTimeout(() => setSuccessMsg(''), 3000);
+      
+      if (formData.category === 'Team') fetchTeamsList();
+      loadData(true); // Refresh active tab
     } catch (err) {
-      console.error('Database Operation Error:', err.message);
       setErrorMsg(`Failed to save entry: ${err.message}`);
     }
   };
 
+  // --- 6. RENDER HELPERS ---
   const AdminControls = ({ entry }) => (
     <div className="absolute top-2 right-2 flex gap-1 bg-white/90 p-1 rounded-lg border border-slate-200 backdrop-blur shadow-md opacity-0 group-hover:opacity-100 transition-opacity z-10">
       <button onClick={(e) => { e.stopPropagation(); handleEditClick(entry); }} className="p-1.5 text-blue-600 hover:text-blue-500 hover:bg-slate-100 rounded transition-colors" title="Edit">
@@ -260,6 +344,7 @@ export default function App() {
       <div className="flex flex-col justify-between flex-grow p-3 text-sm pr-8">
         <div>
             <div className="text-lg font-black italic text-slate-800 leading-tight mb-1">{entry.name}</div>
+            <div className="text-xs font-bold text-slate-400 mb-1 tracking-wide uppercase">{entry.category}</div>
             {entry.category === 'Umamusume' && (
                 <>
                 {entry.team && <div className="text-[#1942d8] font-bold italic text-xs">{entry.team}</div>}
@@ -270,7 +355,6 @@ export default function App() {
                 <div className="text-[#ffb800] font-bold italic text-xs">Team: {entry.team || 'Independent'}</div>
             )}
             {entry.category === 'Rival' && <div className="text-[#ff3b3b] font-bold italic text-xs">Season: {entry.season}</div>}
-            {entry.category === 'NPC' && <div className="text-[#1942d8] font-bold italic text-xs">General NPC</div>}
         </div>
         <div className="flex flex-col gap-1 mt-2">
             {entry.submitter && <div className="text-xs text-slate-500 font-bold">Owner: <span className="text-slate-700">{entry.submitter}</span></div>}
@@ -309,16 +393,31 @@ export default function App() {
   );
 
   const renderGallery = () => {
+    // SEARCH TAB
+    if (activeMainTab === 'Search') {
+      return (
+        <div className="mb-10">
+          <div className="flex flex-col sm:flex-row gap-3 mb-8">
+            <input type="text" placeholder="Search characters, teams, trainers..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} onKeyDown={e => e.key === 'Enter' && loadData(true)} className="flex-grow bg-white border-2 border-slate-200 rounded-xl p-4 text-slate-800 font-bold outline-none focus:border-[#1942d8] shadow-sm"/>
+            <button onClick={() => loadData(true)} className="px-8 py-4 bg-[#1942d8] hover:bg-[#3b72ff] text-white font-black italic rounded-xl shadow-md transition-colors text-lg">Search DB</button>
+          </div>
+          {entries.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-6">
+              {entries.map(renderCard)}
+            </div>
+          ) : (
+            !loading && searchQuery && <div className="text-center py-20 text-slate-400"><p className="text-xl font-black italic">No matches found for "{searchQuery}".</p></div>
+          )}
+        </div>
+      );
+    }
+
+    // TEAMS TAB
     if (activeMainTab === 'Teams') {
       const teamEntries = entries.filter(e => e.category === 'Team');
       const selectedTeam = teamEntries.find(e => e.ui_id === selectedTeamId) || teamEntries[0];
 
-      if (teamEntries.length === 0) return <div className="text-center py-20 text-slate-500"><p className="text-xl font-black italic">No Teams created yet.</p></div>;
-
-      const teamMembers = selectedTeam ? entries.filter(e => e.team === selectedTeam.name && e.category !== 'Team') : [];
-      const headTrainers = teamMembers.filter(e => e.category === 'Trainer' && e.trainerRole === 'Head Trainer');
-      const assistantTrainers = teamMembers.filter(e => e.category === 'Trainer' && e.trainerRole === 'Assistant Trainer');
-      const trainees = teamMembers.filter(e => e.category === 'Umamusume');
+      if (teamEntries.length === 0 && !loading) return <div className="text-center py-20 text-slate-500"><p className="text-xl font-black italic">No Teams created yet.</p></div>;
 
       return (
         <div className="flex flex-col lg:flex-row gap-8">
@@ -350,13 +449,13 @@ export default function App() {
                 </div>
                 <div className="flex flex-col gap-6">
                   <div className="space-y-3">
-                    {headTrainers.length > 0 ? headTrainers.map(m => renderTeamMemberCard(m, 'Head Trainer')) : <EmptyMemberPlaceholder roleLabel="Head Trainer" />}
+                    {teamMembers.head.length > 0 ? teamMembers.head.map(m => renderTeamMemberCard(m, 'Head Trainer')) : <EmptyMemberPlaceholder roleLabel="Head Trainer" />}
                   </div>
                   <div className="space-y-3">
-                    {assistantTrainers.length > 0 ? assistantTrainers.map(m => renderTeamMemberCard(m, 'Assistant Trainer')) : <EmptyMemberPlaceholder roleLabel="Assistant Trainer" />}
+                    {teamMembers.assistant.length > 0 ? teamMembers.assistant.map(m => renderTeamMemberCard(m, 'Assistant Trainer')) : <EmptyMemberPlaceholder roleLabel="Assistant Trainer" />}
                   </div>
                   <div className="space-y-3">
-                    {trainees.length > 0 ? trainees.map(m => renderTeamMemberCard(m, 'Umamusume Trainee')) : <EmptyMemberPlaceholder roleLabel="Umamusume Trainee" />}
+                    {teamMembers.trainees.length > 0 ? teamMembers.trainees.map(m => renderTeamMemberCard(m, 'Umamusume Trainee')) : <EmptyMemberPlaceholder roleLabel="Umamusume Trainee" />}
                   </div>
                 </div>
               </div>
@@ -366,10 +465,8 @@ export default function App() {
       );
     }
 
-    const categoryEntries = entries.filter(e => e.category === activeMainTab);
-    
+    // UMAMUSUME TAB
     if (activeMainTab === 'Umamusume') {
-      const typeFiltered = categoryEntries.filter(e => e.type === activeUmaTab);
       return (
         <div>
           <div className="flex mb-6 space-x-2 border-b-2 border-slate-200 pb-0">
@@ -378,7 +475,7 @@ export default function App() {
             <button onClick={() => setActiveUmaTab('Unassigned')} className={`px-6 py-3 rounded-t-lg font-black italic text-lg transition-colors -mb-0.5 ${activeUmaTab === 'Unassigned' ? 'bg-[#8b5cf6] text-white' : 'bg-slate-100 text-slate-400 hover:text-slate-600'}`}>Unassigned / Needs Edit</button>
           </div>
           {['Ritto', 'Miho', 'Independent', 'Unassigned'].map(dorm => {
-            const group = typeFiltered.filter(e => e.dorm === dorm);
+            const group = entries.filter(e => e.dorm === dorm);
             if (group.length === 0) return null;
             return (
               <div key={dorm} className="mb-10">
@@ -394,10 +491,11 @@ export default function App() {
       );
     }
 
+    // TRAINER TAB
     if (activeMainTab === 'Trainer') {
-      const teams = [...new Set(categoryEntries.map(e => e.team || 'Independent'))].sort();
-      return teams.map(team => {
-        const group = categoryEntries.filter(e => (e.team || 'Independent') === team);
+      const teamsList = [...new Set(entries.map(e => e.team || 'Independent'))].sort();
+      return teamsList.map(team => {
+        const group = entries.filter(e => (e.team || 'Independent') === team);
         return (
           <div key={team} className="mb-10">
             <h3 className="text-2xl font-black italic text-slate-800 pb-2 mb-4 flex items-center gap-2">
@@ -410,6 +508,7 @@ export default function App() {
       });
     }
 
+    // NPC / RIVAL TABS
     if (['Rival', 'NPC'].includes(activeMainTab)) {
       const colorMap = { 'Rival': 'bg-[#ff3b3b]', 'NPC': 'bg-[#1942d8]' };
       return (
@@ -418,7 +517,7 @@ export default function App() {
              <span className={`w-4 h-8 inline-block -skew-x-12 ${colorMap[activeMainTab]}`}></span>
              Registered {activeMainTab}s
           </h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-6">{categoryEntries.map(renderCard)}</div>
+          <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-6">{entries.map(renderCard)}</div>
         </div>
       ); 
     }
@@ -537,7 +636,6 @@ export default function App() {
 
               <div><label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">{formData.category === 'Team' ? 'Team Name' : 'Character Name'}</label><input type="text" name="name" value={formData.name} onChange={handleInputChange} required className="w-full bg-white border-2 border-slate-200 rounded p-2 text-slate-800 font-medium focus:border-[#1942d8] outline-none" /></div>
               
-              {/* Only show Submitter and Link if the schema supports it for the current category */}
               {['Umamusume', 'Trainer', 'NPC'].includes(formData.category) && (
                   <div><label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Discord Owner / Submitter</label><input type="text" name="submitter" value={formData.submitter} onChange={handleInputChange} className="w-full bg-white border-2 border-slate-200 rounded p-2 text-slate-800 font-medium focus:border-[#1942d8] outline-none" /></div>
               )}
@@ -545,7 +643,6 @@ export default function App() {
                   <div><label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Google Doc / Source Link</label><input type="url" name="link" value={formData.link} onChange={handleInputChange} className="w-full bg-white border-2 border-slate-200 rounded p-2 text-slate-800 font-medium focus:border-[#1942d8] outline-none" /></div>
               )}
               
-              {/* Image upload is now available globally */}
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Image / Logo Upload</label>
                 <div className="flex items-center gap-3">
@@ -583,10 +680,9 @@ export default function App() {
         <div className="lg:col-span-3">
           <div className="bg-white rounded-xl shadow-lg border-2 border-slate-100 h-[calc(100vh-100px)] overflow-hidden flex flex-col">
             
-            {/* Added shrink-0 here to fix the squishing issue */}
             <div className="shrink-0 flex bg-[#f8f9fc] border-b-4 border-slate-200 overflow-x-auto hide-scrollbar w-full sticky top-0 z-20">
-              {['Umamusume', 'Teams', 'Trainer', 'NPC', 'Rival'].map(tab => {
-                const colorMap = { 'Umamusume': '#ff4da6', 'Teams': '#8b5cf6', 'Trainer': '#ffb800', 'NPC': '#1942d8', 'Rival': '#ff3b3b' };
+              {['Search', 'Umamusume', 'Teams', 'Trainer', 'NPC', 'Rival'].map(tab => {
+                const colorMap = { 'Search': '#00d182', 'Umamusume': '#ff4da6', 'Teams': '#8b5cf6', 'Trainer': '#ffb800', 'NPC': '#1942d8', 'Rival': '#ff3b3b' };
                 const color = colorMap[tab];
                 const isActive = activeMainTab === tab;
                 return (
@@ -603,18 +699,18 @@ export default function App() {
               })}
             </div>
 
-            <div className="p-6 sm:p-8 bg-slate-50/50 flex-grow overflow-y-auto">
-              {loading ? (
-                <div className="flex justify-center items-center h-64">
-                  <div className="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-[#1942d8]"></div>
+            {/* Note the onScroll listener added to this div below */}
+            <div className="p-6 sm:p-8 bg-slate-50/50 flex-grow overflow-y-auto" onScroll={handleScroll}>
+              {renderGallery()}
+              
+              {entries.length === 0 && !loading && activeMainTab !== 'Teams' && activeMainTab !== 'Search' && (
+                <div className="text-center py-20 text-slate-400"><p className="text-2xl font-black italic">No entries yet for this category.</p></div>
+              )}
+              
+              {loading && (
+                <div className="flex justify-center items-center py-10">
+                  <div className="animate-spin rounded-full h-10 w-10 border-t-4 border-b-4 border-[#1942d8]"></div>
                 </div>
-              ) : (
-                <>
-                  {renderGallery()}
-                  {entries.filter(e => e.category === activeMainTab).length === 0 && activeMainTab !== 'Teams' && (
-                    <div className="text-center py-20 text-slate-400"><p className="text-2xl font-black italic">No entries yet for this category.</p></div>
-                  )}
-                </>
               )}
             </div>
           </div>
