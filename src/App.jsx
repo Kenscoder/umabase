@@ -72,7 +72,6 @@ export default function App() {
   }, []);
 
   // --- 2. LAZY LOAD DATA (Tabs, Pagination, & Search) ---
-  // --- 2. LAZY LOAD DATA (Tabs, Pagination, & Search) ---
   const loadData = async (isReset = false) => {
     if (loading && !isReset) return;
     setLoading(true);
@@ -116,20 +115,23 @@ export default function App() {
       } else {
         if (activeMainTab === 'Umamusume') {
           let query = supabase.from('characters').select('*');
-          
-          // Properly handle filtering for Canon, OC, and Unassigned/null types
           if (activeUmaTab === 'Unassigned') {
             query = query.or('type.is.null,type.eq.Unassigned');
           } else {
             query = query.eq('type', activeUmaTab);
           }
-
           const { data } = await query.range(from, to).order('created_at', { ascending: false });
           newEntries = (data || []).map(e => ({ ...e, ui_id: `char-${e.id}`, _table: 'characters', category: 'Umamusume', trainer: e.trainer_name, team: e.team_name, type: e.type || 'Unassigned', dorm: e.dorm || 'Unassigned' }));
         
         } else if (activeMainTab === 'Teams') {
-          const { data } = await supabase.from('teams').select('*').range(from, to).order('created_at', { ascending: false });
+          // Pull all teams so the sidebar menu populates correctly
+          const { data } = await supabase.from('teams').select('*').order('created_at', { ascending: false });
           newEntries = (data || []).map(e => ({ ...e, ui_id: `team-${e.id}`, _table: 'teams', category: 'Team' }));
+          
+          // Auto-select the first team if none is selected yet
+          if (newEntries.length > 0 && !selectedTeamId) {
+            setSelectedTeamId(newEntries[0].ui_id);
+          }
         
         } else if (activeMainTab === 'Trainer') {
           const { data } = await supabase.from('trainers').select('*').range(from, to).order('created_at', { ascending: false });
@@ -146,7 +148,7 @@ export default function App() {
 
         fetchCount = newEntries.length;
         setEntries(prev => isReset ? newEntries : [...prev, ...newEntries]);
-        setHasMore(fetchCount === PAGE_SIZE);
+        setHasMore(activeMainTab === 'Teams' ? false : fetchCount === PAGE_SIZE);
         setPage(currentPage + 1);
       }
     } catch (err) {
@@ -168,7 +170,8 @@ export default function App() {
   useEffect(() => {
     const fetchTeamMembers = async () => {
       if (activeMainTab === 'Teams' && selectedTeamId) {
-        const selectedTeam = entries.find(e => e.ui_id === selectedTeamId);
+        const teamEntries = entries.filter(e => e.category === 'Team');
+        const selectedTeam = teamEntries.find(e => e.ui_id === selectedTeamId);
         if (!selectedTeam) return;
         
         const [cRes, tRes] = await Promise.all([
