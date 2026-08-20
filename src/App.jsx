@@ -26,6 +26,104 @@ const generateDailyPassword = () => {
     return `${words[seed % words.length]}${seed % 99}`;
 };
 
+// --- EGRESS OPTIMIZATION: minimal column selects per table ---
+// Only pulling the columns each view actually renders keeps Supabase response
+// payloads (and therefore egress) as small as possible instead of `select('*')`.
+const COLS = {
+  characters: 'id,name,type,dorm,trainer_name,roommate,team_name,image,link,submitter,created_at',
+  teams: 'id,name,image,link',
+  trainers: 'id,name,team_name,discord_submitter,position,image,link',
+  npcs: 'id,name,submitter,image,link,created_at',
+  rivals: 'id,name,season,image,link,created_at',
+};
+
+// --- SEASON SORTING (Rivals tab) ---
+// Sorts "Season 0", "Season 1", "Season 2"... numerically ascending. Any non-numeric
+// labels (e.g. "URA Finals") fall to the end, alphabetically among themselves.
+const sortSeasons = (seasons) => {
+  return [...seasons].sort((a, b) => {
+    const numA = a.match(/\d+/);
+    const numB = b.match(/\d+/);
+    if (numA && numB) return parseInt(numA[0], 10) - parseInt(numB[0], 10);
+    if (numA && !numB) return -1;
+    if (!numA && numB) return 1;
+    return a.localeCompare(b);
+  });
+};
+
+// --- IMAGE PIPELINE: convert uploads to WebP before they ever touch Supabase Storage ---
+// Smaller files at rest = smaller files served later, which is the biggest lever we have
+// on Supabase egress since every card image is re-downloaded on every page load.
+
+// Cheap heuristic GIF-animation sniff: count Graphic Control Extension blocks (0x21 0xF9),
+// which precede each animated frame. More than one strongly implies an animated GIF.
+const isAnimatedGif = async (file) => {
+  try {
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let frameMarkers = 0;
+    for (let i = 0; i < bytes.length - 1; i++) {
+      if (bytes[i] === 0x21 && bytes[i + 1] === 0xf9) {
+        frameMarkers++;
+        if (frameMarkers > 1) return true;
+      }
+    }
+    return false;
+  } catch {
+    return true; // fail safe: assume animated so we never silently strip an animation
+  }
+};
+
+const resizeAndConvertToWebP = (file, maxDim = 1000, quality = 0.82) => {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        const scale = maxDim / Math.max(width, height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        URL.revokeObjectURL(objectUrl);
+        if (blob) resolve(blob); else reject(new Error('Canvas could not produce a WebP blob'));
+      }, 'image/webp', quality);
+    };
+    img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error('Could not load image for conversion')); };
+    img.src = objectUrl;
+  });
+};
+
+// Note: a browser <canvas> can only ever grab a single still frame, so a truly *animated*
+// GIF can't be losslessly re-encoded as an animated WebP client-side without a WASM
+// encoder/decoder pair (out of scope here). To avoid silently flattening someone's
+// animation, animated GIFs are left as GIF; everything else (static images, static GIFs,
+// PNG/JPG/etc.) gets resized + converted to WebP.
+const prepareImageForUpload = async (file) => {
+  if (file.type === 'image/gif') {
+    const animated = await isAnimatedGif(file);
+    if (animated) return { blob: file, ext: 'gif', contentType: 'image/gif' };
+  }
+  try {
+    const webpBlob = await resizeAndConvertToWebP(file);
+    return { blob: webpBlob, ext: 'webp', contentType: 'image/webp' };
+  } catch (err) {
+    console.warn('WebP conversion failed, falling back to original file:', err.message);
+    return { blob: file, ext: (file.name.split('.').pop() || 'bin').toLowerCase(), contentType: file.type || 'application/octet-stream' };
+  }
+};
+
+// --- CLIENT-SIDE READ CACHE (egress optimization) ---
+// Short-lived cache so flipping between tabs (or back to one you already visited) doesn't
+// re-hit Supabase every single time. Cleared automatically after any write.
+const CACHE_TTL = 45000;
+
 export default function App() {
   // --- STATE MANAGEMENT ---
   const [entries, setEntries] = useState([]);
@@ -33,7 +131,8 @@ export default function App() {
   
   // Tabs & Views
   const [activeMainTab, setActiveMainTab] = useState('Umamusume');
-  const [activeUmaTab, setActiveUmaTab] = useState('Canon'); 
+  const [activeUmaTab, setActiveUmaTab] = useState('Canon');
+  const [activeDormTab, setActiveDormTab] = useState('Ritto');
   const [selectedTeamId, setSelectedTeamId] = useState(null);
   
   // Infinite Scroll Pagination
@@ -47,6 +146,11 @@ export default function App() {
   // Relational Data
   const [availableTeams, setAvailableTeams] = useState([]);
   const [teamMembers, setTeamMembers] = useState({ head: [], assistant: [], trainees: [] });
+
+  // Read caches (refs so they persist across renders without causing re-renders themselves)
+  const dataCacheRef = useRef({});
+  const teamMembersCacheRef = useRef({});
+  const searchCacheRef = useRef({});
 
   // Form & Modals
   const [editingId, setEditingId] = useState(null); 
@@ -72,8 +176,35 @@ export default function App() {
     fetchTeamsList();
   }, []);
 
+  const invalidateCaches = () => {
+    dataCacheRef.current = {};
+    teamMembersCacheRef.current = {};
+    searchCacheRef.current = {};
+  };
+
+  const getCacheKey = () => {
+    if (activeMainTab === 'Umamusume') return `Umamusume-${activeUmaTab}-${activeDormTab}`;
+    return activeMainTab;
+  };
+
   // --- 2. LAZY LOAD DATA (Tabs, Pagination, & Search) ---
   const loadData = async (isReset = false) => {
+    const cacheKey = getCacheKey();
+
+    if (isReset && activeMainTab !== 'Search') {
+      const cached = dataCacheRef.current[cacheKey];
+      if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+        setEntries(cached.entries);
+        setPage(cached.page);
+        setHasMore(cached.hasMore);
+        setLoading(false);
+        return;
+      }
+      // Clear immediately so the previous tab's stale entries never flash inside the
+      // newly-selected tab's layout while the fresh fetch is in flight.
+      setEntries([]);
+    }
+
     if (loading && !isReset) return;
     setLoading(true);
     
@@ -86,20 +217,29 @@ export default function App() {
       let fetchCount = 0;
 
       if (activeMainTab === 'Search') {
-        if (!searchQuery.trim()) {
+        const q = searchQuery.trim();
+        if (!q) {
           setEntries([]);
           setHasMore(false);
           setLoading(false);
           return;
         }
+
+        const cachedSearch = searchCacheRef.current[q];
+        if (cachedSearch && (Date.now() - cachedSearch.timestamp) < CACHE_TTL) {
+          setEntries(cachedSearch.entries);
+          setHasMore(false);
+          setLoading(false);
+          return;
+        }
         
-        const s = `%${searchQuery}%`;
+        const s = `%${q}%`;
         const [c, t, tr, n, r] = await Promise.all([
-          supabase.from('characters').select('*').ilike('name', s).limit(15),
-          supabase.from('teams').select('*').ilike('name', s).limit(15),
-          supabase.from('trainers').select('*').ilike('name', s).limit(15),
-          supabase.from('npcs').select('*').ilike('name', s).limit(15),
-          supabase.from('rivals').select('*').ilike('name', s).limit(15)
+          supabase.from('characters').select(COLS.characters).ilike('name', s).limit(15),
+          supabase.from('teams').select(COLS.teams).ilike('name', s).limit(15),
+          supabase.from('trainers').select(COLS.trainers).ilike('name', s).limit(15),
+          supabase.from('npcs').select(COLS.npcs).ilike('name', s).limit(15),
+          supabase.from('rivals').select(COLS.rivals).ilike('name', s).limit(15)
         ]);
 
         newEntries = [
@@ -110,49 +250,51 @@ export default function App() {
           ...(r.data || []).map(e => ({ ...e, ui_id: `riv-${e.id}`, _table: 'rivals', category: 'Rival' }))
         ].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
 
+        searchCacheRef.current[q] = { entries: newEntries, timestamp: Date.now() };
         setEntries(newEntries);
         setHasMore(false);
         
       } else {
         if (activeMainTab === 'Umamusume') {
-          let query = supabase.from('characters').select('*');
-          if (activeUmaTab === 'Unassigned') {
-            query = query.or('type.is.null,type.eq.Unassigned');
-          } else {
-            query = query.eq('type', activeUmaTab);
-          }
+          let query = supabase.from('characters').select(COLS.characters);
+          query = activeUmaTab === 'Unassigned' ? query.or('type.is.null,type.eq.Unassigned') : query.eq('type', activeUmaTab);
+          query = activeDormTab === 'Unassigned' ? query.or('dorm.is.null,dorm.eq.Unassigned') : query.eq('dorm', activeDormTab);
           const { data } = await query.range(from, to).order('created_at', { ascending: false });
           newEntries = (data || []).map(e => ({ ...e, ui_id: `char-${e.id}`, _table: 'characters', category: 'Umamusume', trainer: e.trainer_name, team: e.team_name, type: e.type || 'Unassigned', dorm: e.dorm || 'Unassigned' }));
         
         } else if (activeMainTab === 'Teams') {
           // Pull all teams so the sidebar menu populates correctly
-          const { data, error } = await supabase.from('teams').select('*').order('id', { ascending: false });
+          const { data, error } = await supabase.from('teams').select(COLS.teams).order('id', { ascending: false });
           if (error) console.error('Teams fetch error:', error.message, error);
           newEntries = (data || []).map(e => ({ ...e, ui_id: `team-${e.id}`, _table: 'teams', category: 'Team' }));
-          
-          // Auto-select the first team if none is selected yet
-          if (newEntries.length > 0 && !selectedTeamId) {
-            setSelectedTeamId(newEntries[0].ui_id);
-          }
+          // Note: team member details only load once the user actually clicks a team
+          // (see the "Teams member fetch" effect below) rather than being auto-selected.
         
         } else if (activeMainTab === 'Trainer') {
-          const { data, error } = await supabase.from('trainers').select('*').range(from, to).order('id', { ascending: false });
+          const { data, error } = await supabase.from('trainers').select(COLS.trainers).range(from, to).order('id', { ascending: false });
           if (error) console.error('Trainer fetch error:', error.message, error);
           newEntries = (data || []).map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position }));
         
         } else if (activeMainTab === 'NPC') {
-          const { data } = await supabase.from('npcs').select('*').range(from, to).order('created_at', { ascending: false });
+          const { data } = await supabase.from('npcs').select(COLS.npcs).range(from, to).order('created_at', { ascending: false });
           newEntries = (data || []).map(e => ({ ...e, ui_id: `npc-${e.id}`, _table: 'npcs', category: 'NPC' }));
         
         } else if (activeMainTab === 'Rival') {
-          const { data } = await supabase.from('rivals').select('*').range(from, to).order('created_at', { ascending: false });
+          const { data } = await supabase.from('rivals').select(COLS.rivals).range(from, to).order('created_at', { ascending: false });
           newEntries = (data || []).map(e => ({ ...e, ui_id: `riv-${e.id}`, _table: 'rivals', category: 'Rival' }));
         }
 
         fetchCount = newEntries.length;
-        setEntries(prev => isReset ? newEntries : [...prev, ...newEntries]);
-        setHasMore(activeMainTab === 'Teams' ? false : fetchCount === PAGE_SIZE);
-        setPage(currentPage + 1);
+        const newHasMore = activeMainTab === 'Teams' ? false : fetchCount === PAGE_SIZE;
+        const newPage = currentPage + 1;
+
+        setEntries(prev => {
+          const updated = isReset ? newEntries : [...prev, ...newEntries];
+          dataCacheRef.current[cacheKey] = { entries: updated, page: newPage, hasMore: newHasMore, timestamp: Date.now() };
+          return updated;
+        });
+        setHasMore(newHasMore);
+        setPage(newPage);
       }
     } catch (err) {
       console.error('Fetch Error:', err.message);
@@ -167,29 +309,36 @@ export default function App() {
     } else {
       setEntries([]); // Clear for fresh search
     }
-  }, [activeMainTab, activeUmaTab]);
+  }, [activeMainTab, activeUmaTab, activeDormTab]);
 
-  // --- 3. FETCH SPECIFIC TEAM MEMBERS ---
+  // --- 3. FETCH SPECIFIC TEAM MEMBERS (only once a team is actually clicked) ---
   useEffect(() => {
     const fetchTeamMembers = async () => {
-      if (activeMainTab === 'Teams' && selectedTeamId) {
-        const teamEntries = entries.filter(e => e.category === 'Team');
-        const selectedTeam = teamEntries.find(e => e.ui_id === selectedTeamId);
-        if (!selectedTeam) return;
-        
-        const [cRes, tRes] = await Promise.all([
-          supabase.from('characters').select('*').eq('team_name', selectedTeam.name),
-          supabase.from('trainers').select('*').eq('team_name', selectedTeam.name)
-        ]);
-        if (cRes.error) console.error('Team members (characters) fetch error:', cRes.error.message, cRes.error);
-        if (tRes.error) console.error('Team members (trainers) fetch error:', tRes.error.message, tRes.error);
-        
-        setTeamMembers({
-          head: (tRes.data || []).filter(t => t.position === 'Head Trainer').map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position })),
-          assistant: (tRes.data || []).filter(t => t.position === 'Assistant Trainer').map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position })),
-          trainees: (cRes.data || []).map(e => ({ ...e, ui_id: `char-${e.id}`, _table: 'characters', category: 'Umamusume', trainer: e.trainer_name, team: e.team_name, type: e.type || 'Unassigned', dorm: e.dorm || 'Unassigned' }))
-        });
+      if (activeMainTab !== 'Teams' || !selectedTeamId) return;
+      const teamEntries = entries.filter(e => e.category === 'Team');
+      const selectedTeam = teamEntries.find(e => e.ui_id === selectedTeamId);
+      if (!selectedTeam) return;
+
+      const cached = teamMembersCacheRef.current[selectedTeam.name];
+      if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+        setTeamMembers(cached.data);
+        return;
       }
+        
+      const [cRes, tRes] = await Promise.all([
+        supabase.from('characters').select(COLS.characters).eq('team_name', selectedTeam.name),
+        supabase.from('trainers').select(COLS.trainers).eq('team_name', selectedTeam.name)
+      ]);
+      if (cRes.error) console.error('Team members (characters) fetch error:', cRes.error.message, cRes.error);
+      if (tRes.error) console.error('Team members (trainers) fetch error:', tRes.error.message, tRes.error);
+      
+      const data = {
+        head: (tRes.data || []).filter(t => t.position === 'Head Trainer').map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position })),
+        assistant: (tRes.data || []).filter(t => t.position === 'Assistant Trainer').map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position })),
+        trainees: (cRes.data || []).map(e => ({ ...e, ui_id: `char-${e.id}`, _table: 'characters', category: 'Umamusume', trainer: e.trainer_name, team: e.team_name, type: e.type || 'Unassigned', dorm: e.dorm || 'Unassigned' }))
+      };
+      teamMembersCacheRef.current[selectedTeam.name] = { data, timestamp: Date.now() };
+      setTeamMembers(data);
     };
     fetchTeamMembers();
   }, [selectedTeamId, activeMainTab, entries]);
@@ -216,12 +365,18 @@ export default function App() {
     if (!file) return;
 
     try {
-      // Create a unique file name and upload to the Storage Bucket
-      const fileExt = file.name.split('.').pop();
-      const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`;
+      // Run every upload through the WebP pipeline first (see prepareImageForUpload above)
+      // before it ever reaches Supabase Storage, to cut both storage and egress.
+      const { blob, ext, contentType } = await prepareImageForUpload(file);
+
+      const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${ext}`;
       const filePath = `public/${fileName}`;
 
-      const { error: uploadError } = await supabase.storage.from('images').upload(filePath, file);
+      const { error: uploadError } = await supabase.storage.from('images').upload(filePath, blob, {
+        contentType,
+        cacheControl: '31536000', // far-future cache header so repeat views don't re-pull the asset
+        upsert: false,
+      });
       if (uploadError) throw uploadError;
 
       // Grab the clean public URL and save it to the form
@@ -267,6 +422,7 @@ export default function App() {
       setDeleteModal({ isOpen: false, entryId: null, dbTable: null, ui_id: null, password: '', error: '' });
       setSuccessMsg('Entry deleted successfully.');
       setTimeout(() => setSuccessMsg(''), 3000);
+      invalidateCaches();
       if (deleteModal.dbTable === 'teams') fetchTeamsList();
     } catch (err) {
       setDeleteModal(prev => ({ ...prev, error: 'Failed to delete row from database.' }));
@@ -327,6 +483,7 @@ export default function App() {
       if (fileInput) fileInput.value = '';
       setTimeout(() => setSuccessMsg(''), 3000);
       
+      invalidateCaches();
       if (formData.category === 'Team') fetchTeamsList();
       loadData(true); // Refresh active tab
     } catch (err) {
@@ -359,7 +516,7 @@ export default function App() {
       <AdminControls entry={entry} />
       <div className={`w-3 shrink-0 ${getAccentColor(entry)}`} />
       <div className="w-32 h-full shrink-0 bg-slate-100 border-r-2 border-slate-100 flex items-center justify-center overflow-hidden">
-        {entry.image ? <img src={entry.image} alt={entry.name} className="w-full h-full object-cover object-top" /> : <span className="text-slate-400 text-xs font-bold text-center px-2">No Image</span>}
+        {entry.image ? <img src={entry.image} alt={entry.name} loading="lazy" decoding="async" className="w-full h-full object-cover object-top" /> : <span className="text-slate-400 text-xs font-bold text-center px-2">No Image</span>}
       </div>
       <div className="flex flex-col justify-between flex-grow p-3 text-sm pr-8">
         <div>
@@ -392,7 +549,7 @@ export default function App() {
     <div key={member.ui_id} className="relative group flex flex-col sm:flex-row items-start sm:items-center gap-4 bg-white p-3 rounded-xl border-2 border-slate-100 hover:border-[#1942d8] transition-colors shadow-sm">
         <AdminControls entry={member} />
         <div className="w-20 h-20 shrink-0 bg-slate-100 border-2 border-slate-200 rounded-lg overflow-hidden flex items-center justify-center">
-            {member.image ? <img src={member.image} className="w-full h-full object-cover object-top"/> : <span className="text-slate-400 text-xs font-bold text-center px-1">No Pic</span>}
+            {member.image ? <img src={member.image} loading="lazy" decoding="async" className="w-full h-full object-cover object-top"/> : <span className="text-slate-400 text-xs font-bold text-center px-1">No Pic</span>}
         </div>
         <div className="flex flex-col justify-center pr-8">
             <span className="text-xs font-bold tracking-wider text-[#ff4da6] uppercase mb-0.5">{roleLabel}</span>
@@ -432,27 +589,34 @@ export default function App() {
       );
     }
 
-    // TEAMS TAB
+    // TEAMS TAB — concise, clickable list; member roster only appears once a team is selected
     if (activeMainTab === 'Teams') {
       const teamEntries = entries.filter(e => e.category === 'Team');
-      const selectedTeam = teamEntries.find(e => e.ui_id === selectedTeamId) || teamEntries[0];
+      const selectedTeam = teamEntries.find(e => e.ui_id === selectedTeamId);
 
       if (teamEntries.length === 0 && !loading) return <div className="text-center py-20 text-slate-500"><p className="text-xl font-black italic">No Teams created yet.</p></div>;
 
       return (
         <div className="flex flex-col lg:flex-row gap-8">
-          <div className="w-full lg:w-1/3 flex flex-col gap-4">
-            <h3 className="text-xl font-black italic text-slate-800 mb-2 px-2 border-l-4 border-[#1942d8]">Registered Teams</h3>
-            <div className="flex flex-row lg:flex-col gap-3 overflow-x-auto lg:overflow-visible pb-4 lg:pb-0 hide-scrollbar">
-              {teamEntries.map(team => (
-                <div key={team.ui_id} onClick={() => setSelectedTeamId(team.ui_id)} className={`relative group shrink-0 w-40 lg:w-full p-3 border-2 ${selectedTeam?.ui_id === team.ui_id ? 'border-[#1942d8] bg-blue-50/50 shadow-md' : 'border-slate-100 bg-white hover:border-slate-300'} rounded-xl cursor-pointer transition-all flex flex-col items-center`}>
-                  <AdminControls entry={team} />
-                  <div className="w-full aspect-square bg-slate-100 mb-3 overflow-hidden flex items-center justify-center rounded-lg border-2 border-slate-200">
-                    {team.image ? <img src={team.image} className="w-full h-full object-cover"/> : <span className="text-slate-400 font-bold text-sm">No Logo</span>}
+          <div className="w-full lg:w-1/3 flex flex-col gap-3">
+            <h3 className="text-xl font-black italic text-slate-800 mb-1 px-2 border-l-4 border-[#1942d8]">Registered Teams</h3>
+            <div className="flex flex-col gap-2">
+              {teamEntries.map(team => {
+                const isSelected = selectedTeamId === team.ui_id;
+                return (
+                  <div
+                    key={team.ui_id}
+                    onClick={() => setSelectedTeamId(isSelected ? null : team.ui_id)}
+                    className={`relative group flex items-center gap-3 p-2 pr-10 border-2 rounded-lg cursor-pointer transition-all ${isSelected ? 'border-[#1942d8] bg-blue-50/50 shadow-sm' : 'border-slate-100 bg-white hover:border-slate-300'}`}
+                  >
+                    <AdminControls entry={team} />
+                    <div className="w-10 h-10 shrink-0 bg-slate-100 rounded-md overflow-hidden border border-slate-200 flex items-center justify-center">
+                      {team.image ? <img src={team.image} alt={team.name} loading="lazy" decoding="async" className="w-full h-full object-cover"/> : <span className="text-slate-400 text-[9px] font-bold">N/A</span>}
+                    </div>
+                    <div className="font-black italic text-slate-800 text-sm truncate">{team.name}</div>
                   </div>
-                  <div className="font-black italic text-center text-slate-800 text-base">{team.name}</div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
 
@@ -479,34 +643,39 @@ export default function App() {
                   </div>
                 </div>
               </div>
-            ) : null}
+            ) : (
+              <div className="h-full min-h-[240px] flex items-center justify-center py-16 text-slate-400 border-2 border-dashed border-slate-200 rounded-xl">
+                <p className="text-lg font-black italic">Select a team to view its roster.</p>
+              </div>
+            )}
           </div>
         </div>
       );
     }
 
-    // UMAMUSUME TAB
+    // UMAMUSUME TAB — Canon/OC/Unassigned tabs, then a second layer of Ritto/Miho/Independent tabs
     if (activeMainTab === 'Umamusume') {
       return (
         <div>
-          <div className="flex mb-6 space-x-2 border-b-2 border-slate-200 pb-0">
+          <div className="flex mb-4 space-x-2 border-b-2 border-slate-200 pb-0 overflow-x-auto hide-scrollbar">
             <button onClick={() => setActiveUmaTab('Canon')} className={`px-6 py-3 rounded-t-lg font-black italic text-lg transition-colors -mb-0.5 ${activeUmaTab === 'Canon' ? 'bg-[#ff4da6] text-white' : 'bg-slate-100 text-slate-400 hover:text-slate-600'}`}>Canon Roster</button>
             <button onClick={() => setActiveUmaTab('OC')} className={`px-6 py-3 rounded-t-lg font-black italic text-lg transition-colors -mb-0.5 ${activeUmaTab === 'OC' ? 'bg-[#00d182] text-white' : 'bg-slate-100 text-slate-400 hover:text-slate-600'}`}>Original Characters</button>
             <button onClick={() => setActiveUmaTab('Unassigned')} className={`px-6 py-3 rounded-t-lg font-black italic text-lg transition-colors -mb-0.5 ${activeUmaTab === 'Unassigned' ? 'bg-[#8b5cf6] text-white' : 'bg-slate-100 text-slate-400 hover:text-slate-600'}`}>Unassigned / Needs Edit</button>
           </div>
-          {['Ritto', 'Miho', 'Independent', 'Unassigned'].map(dorm => {
-            const group = entries.filter(e => e.dorm === dorm);
-            if (group.length === 0) return null;
-            return (
-              <div key={dorm} className="mb-10">
-                <h3 className="text-2xl font-black italic text-slate-800 pb-2 mb-4 flex items-center gap-2">
-                    <span className={`w-4 h-8 inline-block -skew-x-12 ${dorm === 'Unassigned' ? 'bg-[#8b5cf6]' : 'bg-[#1942d8]'}`}></span>
-                    {dorm} {dorm !== 'Independent' && dorm !== 'Unassigned' && 'Dorm'}
-                </h3>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">{group.map(renderCard)}</div>
-              </div>
-            );
-          })}
+          <div className="flex mb-6 space-x-2 overflow-x-auto hide-scrollbar">
+            {['Ritto', 'Miho', 'Independent', 'Unassigned'].map(dorm => (
+              <button
+                key={dorm}
+                onClick={() => setActiveDormTab(dorm)}
+                className={`shrink-0 px-5 py-2 rounded-lg text-sm font-black italic transition-colors ${activeDormTab === dorm ? 'bg-[#1942d8] text-white shadow' : 'bg-slate-100 text-slate-400 hover:text-slate-600'}`}
+              >
+                {dorm}{dorm !== 'Independent' && dorm !== 'Unassigned' ? ' Dorm' : ''}
+              </button>
+            ))}
+          </div>
+          {entries.length > 0 && (
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">{entries.map(renderCard)}</div>
+          )}
         </div>
       );
     }
@@ -528,18 +697,34 @@ export default function App() {
       });
     }
 
-    // NPC / RIVAL TABS
-    if (['Rival', 'NPC'].includes(activeMainTab)) {
-      const colorMap = { 'Rival': 'bg-[#ff3b3b]', 'NPC': 'bg-[#1942d8]' };
+    // NPC TAB
+    if (activeMainTab === 'NPC') {
       return (
         <div className="mb-10">
-          <h3 className={`text-2xl font-black italic text-slate-800 pb-2 mb-4 flex items-center gap-2`}>
-             <span className={`w-4 h-8 inline-block -skew-x-12 ${colorMap[activeMainTab]}`}></span>
-             Registered {activeMainTab}s
+          <h3 className="text-2xl font-black italic text-slate-800 pb-2 mb-4 flex items-center gap-2">
+             <span className="w-4 h-8 inline-block -skew-x-12 bg-[#1942d8]"></span>
+             Registered NPCs
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-6">{entries.map(renderCard)}</div>
         </div>
-      ); 
+      );
+    }
+
+    // RIVAL TAB — grouped and auto-sorted by season, starting at Season 0
+    if (activeMainTab === 'Rival') {
+      const seasons = sortSeasons([...new Set(entries.map(e => e.season || 'General'))]);
+      return seasons.map(season => {
+        const group = entries.filter(e => (e.season || 'General') === season);
+        return (
+          <div key={season} className="mb-10">
+            <h3 className="text-2xl font-black italic text-slate-800 pb-2 mb-4 flex items-center gap-2">
+               <span className="w-4 h-8 inline-block -skew-x-12 bg-[#ff3b3b]"></span>
+               {season}
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-6">{group.map(renderCard)}</div>
+          </div>
+        );
+      });
     }
   };
 
@@ -649,7 +834,7 @@ export default function App() {
                 {formData.category === 'Rival' && (
                   <div>
                     <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Season / Arc</label>
-                    <input type="text" name="season" placeholder="e.g. URA Finals" value={formData.season} onChange={handleInputChange} className="w-full bg-white border border-slate-200 rounded p-2 text-sm text-slate-700 font-medium" />
+                    <input type="text" name="season" placeholder="e.g. Season 0, Season 1, URA Finals" value={formData.season} onChange={handleInputChange} className="w-full bg-white border border-slate-200 rounded p-2 text-sm text-slate-700 font-medium" />
                   </div>
                 )}
               </div>
@@ -668,11 +853,12 @@ export default function App() {
                 <div className="flex items-center gap-3">
                   {formData.imageBase64 && (
                     <div className="w-10 h-10 shrink-0 bg-slate-100 rounded border border-slate-200 overflow-hidden shadow-sm flex items-center justify-center">
-                      <img src={formData.imageBase64} className="w-full h-full object-cover" />
+                      <img src={formData.imageBase64} loading="lazy" decoding="async" className="w-full h-full object-cover" />
                     </div>
                   )}
                   <input id="file-upload" type="file" accept="image/*" onChange={handleImageUpload} className="w-full bg-white border-2 border-slate-200 rounded p-1 text-slate-600 text-sm file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:font-bold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200 cursor-pointer" />
                 </div>
+                <p className="text-[10px] text-slate-400 mt-1">Images are automatically converted to WebP (and resized) before upload to keep storage/egress low. Animated GIFs are kept as GIF so the animation isn't lost.</p>
               </div>
 
               <div className="pt-4 border-t-2 border-slate-100">
