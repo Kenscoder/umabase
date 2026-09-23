@@ -1,16 +1,104 @@
-# React + Vite
+# Uma Musume Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Frontend web application for the Uma Musume database, built with **React** and **Vite**.
 
-Currently, two official plugins are available:
+The frontend communicates with a dedicated backend API and does not directly access the database.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Technologies
 
-## React Compiler
+* **React 19** — UI framework
+* **Vite 8** — Development server and build tooling
+* **Microsoft Authentication Library (MSAL)** — Microsoft Entra ID authentication
+* **Tailwind CSS** — Styling
+* **Lucide React** — Icons
+* **ESLint** — Code linting
+* **PostCSS / Autoprefixer** — CSS processing
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Authentication
 
-## Expanding the ESLint configuration
+Authentication is handled through **Microsoft Entra ID** using `@azure/msal-browser`.
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+The application uses the browser-based `PublicClientApplication` flow. Authentication configuration is located in `src/authConfig.js`.
+
+No client secrets or other confidential credentials are stored in the frontend.
+
+## Backend API
+
+The frontend communicates with the backend through an HTTPS API.
+
+```text
+Browser
+   ?
+   ? Microsoft Entra ID
+   ?
+ MSAL Authentication
+   ?
+   ? HTTPS
+   ?
+ Nginx
+   ?
+   ?
+ Backend API
+   ?
+   ?
+ Database
+```
+
+The frontend does not communicate directly with the database.
+
+## Development
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Start the Vite development server:
+
+```bash
+npm run dev
+```
+
+Build the production frontend:
+
+```bash
+npm run build
+```
+
+Preview the production build locally:
+
+```bash
+npm run preview
+```
+
+Run ESLint:
+
+```bash
+npm run lint
+```
+
+## Production Deployment
+
+The production frontend is hosted independently behind **Nginx** on a dedicated server.
+
+Deployment is performed manually. GitHub Pages deployment is not used.
+
+The production build is generated with:
+
+```bash
+npm run build
+```
+
+The resulting `dist/` directory can then be deployed to the web server.
+
+## Project Structure
+
+The frontend is responsible for:
+
+* Rendering the web interface
+* User authentication
+* Communicating with the backend API
+* Displaying data returned by the API
+
+Database access and backend processing are handled by the separate API service.

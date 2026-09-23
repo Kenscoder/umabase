@@ -1,5 +1,5 @@
 {
-  "name": "umamusume-db",
+  "name": "umamusume-frontend",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -7,12 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview",
-    "predeploy": "npm run build",
-    "deploy": "gh-pages -d dist"
+    "preview": "vite preview"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.108.2",
+    "@azure/msal-browser": "^4.27.0",
     "discord.js": "^14.26.5",
     "lucide-react": "^1.22.0",
     "react": "^19.2.6",
@@ -27,14 +25,12 @@
     "eslint": "^10.3.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
-    "gh-pages": "^6.3.0",
     "globals": "^17.6.0",
     "postcss": "^8.5.15",
     "tailwindcss": "^3.4.19",
     "vite": "^8.0.12"
   },
-  "description": "This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.",
-  "main": "eslint.config.js",
+  "description": "Uma Musume frontend web application",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Kenscoder/umabase.git"
