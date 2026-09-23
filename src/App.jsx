@@ -1,13 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { createClient } from '@supabase/supabase-js';
+import { useMsal, useIsAuthenticated } from '@azure/msal-react';
+import { loginRequest } from './authConfig';
 import ggLogo from './assets/GG_logo.png';
 import umautoImg from './assets/umauto.jpg';
-
-// --- SUPABASE CLIENT CONFIGURATION ---
-const SUPABASE_URL = 'https://bhknqvfgchhnklogsvoq.supabase.co'; 
-const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_w4v6rE6JD85riM6KMr2SFg_BlGAugtC';
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
 
 // --- ICONS ---
 const EditIcon = () => (
@@ -16,26 +11,6 @@ const EditIcon = () => (
 const TrashIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
 );
-
-// --- PASSWORD GENERATOR ---
-const generateDailyPassword = () => {
-    const localTimeString = new Date().toLocaleString("en-US", { timeZone: "Asia/Makassar" });
-    const date = new Date(localTimeString);
-    const seed = (date.getFullYear() * 10000) + ((date.getMonth() + 1) * 100) + date.getDate();
-    const words = ['Carrot', 'Derby', 'Turf', 'Paca', 'Aoharu', 'URA', 'Spica', 'Sirius', 'G1'];
-    return `${words[seed % words.length]}${seed % 99}`;
-};
-
-// --- EGRESS OPTIMIZATION: minimal column selects per table ---
-// Only pulling the columns each view actually renders keeps Supabase response
-// payloads (and therefore egress) as small as possible instead of `select('*')`.
-const COLS = {
-  characters: 'id,name,type,dorm,trainer_name,roommate,team_name,image,link,submitter,created_at',
-  teams: 'id,name,image,link',
-  trainers: 'id,name,team_name,discord_submitter,position,image,link',
-  npcs: 'id,name,submitter,image,link,created_at',
-  rivals: 'id,name,season,image,link,created_at',
-};
 
 // --- SEASON SORTING (Rivals tab) ---
 // Sorts "Season 0", "Season 1", "Season 2"... numerically ascending. Any non-numeric
@@ -125,6 +100,23 @@ const prepareImageForUpload = async (file) => {
 const CACHE_TTL = 45000;
 
 export default function App() {
+    // --- login ---
+    const { instance, accounts } = useMsal();
+    const isAuthenticated = useIsAuthenticated();
+
+    const getAccessToken = async () => {
+        try {
+            const result = await instance.acquireTokenSilent({ ...loginRequest, account: accounts[0] });
+            return result.accessToken;
+        } catch {
+            const result = await instance.acquireTokenPopup(loginRequest);
+            return result.accessToken;
+        }
+    };
+
+    const handleLogin = () => instance.loginPopup(loginRequest);
+    const handleLogout = () => instance.logoutPopup();
+
   // --- STATE MANAGEMENT ---
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -154,23 +146,34 @@ export default function App() {
 
   // Form & Modals
   const [editingId, setEditingId] = useState(null); 
-  const [deleteModal, setDeleteModal] = useState({ isOpen: false, entryId: null, dbTable: null, ui_id: null, password: '', error: '' });
+  const [deleteModal, setDeleteModal] = useState({ isOpen: false, entryId: null, dbTable: null, ui_id: null, error: '' });
   const [errorMsg, setErrorMsg] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   
-  const [formData, setFormData] = useState({
-    category: 'Umamusume',
-    name: '', link: '', submitter: '', imageBase64: '',
-    type: 'Canon', dorm: 'Ritto', trainer: '', roommate: '', team: '',
-    trainerRole: 'Head Trainer', season: '', password: ''
-  });
+    const [formData, setFormData] = useState({
+        category: 'Umamusume',
+        name: '', link: '', submitter: '', imageBase64: '',
+        type: 'Canon', dorm: 'Ritto', trainer: '', roommate: '', team: '',
+        trainerRole: 'Head Trainer', season: ''
+    });
 
   // --- 1. FETCH AVAILABLE TEAMS (For Dropdowns) ---
-  const fetchTeamsList = async () => {
-    const { data, error } = await supabase.from('teams').select('name').order('name', { ascending: true });
-    if (error) console.error('fetchTeamsList error:', error.message, error);
-    if (data) setAvailableTeams(data.map(t => t.name));
-  };
+    const fetchTeamsList = async () => {
+        try {
+            const response = await fetch('/api/teams');
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            setAvailableTeams(data.map(t => t.name));
+        }
+        catch (error) {
+            console.error('fetchTeamsList error:', error);
+        }
+    };
 
   useEffect(() => {
     fetchTeamsList();
@@ -233,14 +236,19 @@ export default function App() {
           return;
         }
         
-        const s = `%${q}%`;
-        const [c, t, tr, n, r] = await Promise.all([
-          supabase.from('characters').select(COLS.characters).ilike('name', s).limit(15),
-          supabase.from('teams').select(COLS.teams).ilike('name', s).limit(15),
-          supabase.from('trainers').select(COLS.trainers).ilike('name', s).limit(15),
-          supabase.from('npcs').select(COLS.npcs).ilike('name', s).limit(15),
-          supabase.from('rivals').select(COLS.rivals).ilike('name', s).limit(15)
-        ]);
+          const response = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+
+          if (!response.ok) {
+              throw new Error(`HTTP ${response.status}`);
+          }
+
+          const data = await response.json();
+
+          const c = { data: data.characters };
+          const t = { data: data.teams };
+          const tr = { data: data.trainers };
+          const n = { data: data.npcs };
+          const r = { data: data.rivals };
 
         newEntries = [
           ...(c.data || []).map(e => ({ ...e, ui_id: `char-${e.id}`, _table: 'characters', category: 'Umamusume', trainer: e.trainer_name, team: e.team_name, type: e.type || 'Unassigned', dorm: e.dorm || 'Unassigned' })),
@@ -256,31 +264,68 @@ export default function App() {
         
       } else {
         if (activeMainTab === 'Umamusume') {
-          let query = supabase.from('characters').select(COLS.characters);
-          query = activeUmaTab === 'Unassigned' ? query.or('type.is.null,type.eq.Unassigned') : query.eq('type', activeUmaTab);
-          query = activeDormTab === 'Unassigned' ? query.or('dorm.is.null,dorm.eq.Unassigned') : query.eq('dorm', activeDormTab);
-          const { data } = await query.range(from, to).order('created_at', { ascending: false });
+            const params = new URLSearchParams();
+
+            params.set('type', activeUmaTab);
+            params.set('dorm', activeDormTab);
+            params.set('offset', from);
+            params.set('limit', PAGE_SIZE);
+
+            const response = await fetch(`/api/characters?${params.toString()}`);
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            const data = await response.json();
           newEntries = (data || []).map(e => ({ ...e, ui_id: `char-${e.id}`, _table: 'characters', category: 'Umamusume', trainer: e.trainer_name, team: e.team_name, type: e.type || 'Unassigned', dorm: e.dorm || 'Unassigned' }));
         
         } else if (activeMainTab === 'Teams') {
           // Pull all teams so the sidebar menu populates correctly
-          const { data, error } = await supabase.from('teams').select(COLS.teams).order('id', { ascending: false });
-          if (error) console.error('Teams fetch error:', error.message, error);
+            const response = await fetch('/api/teams');
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
           newEntries = (data || []).map(e => ({ ...e, ui_id: `team-${e.id}`, _table: 'teams', category: 'Team' }));
           // Note: team member details only load once the user actually clicks a team
           // (see the "Teams member fetch" effect below) rather than being auto-selected.
         
         } else if (activeMainTab === 'Trainer') {
-          const { data, error } = await supabase.from('trainers').select(COLS.trainers).range(from, to).order('id', { ascending: false });
-          if (error) console.error('Trainer fetch error:', error.message, error);
+            const response = await fetch(
+                `/api/trainers?offset=${from}&limit=${PAGE_SIZE}`
+            );
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
           newEntries = (data || []).map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position }));
         
         } else if (activeMainTab === 'NPC') {
-          const { data } = await supabase.from('npcs').select(COLS.npcs).range(from, to).order('created_at', { ascending: false });
+            const response = await fetch(
+                `/api/npcs?offset=${from}&limit=${PAGE_SIZE}`
+            );
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
           newEntries = (data || []).map(e => ({ ...e, ui_id: `npc-${e.id}`, _table: 'npcs', category: 'NPC' }));
         
         } else if (activeMainTab === 'Rival') {
-          const { data } = await supabase.from('rivals').select(COLS.rivals).range(from, to).order('created_at', { ascending: false });
+            const response = await fetch(
+                `/api/rivals?offset=${from}&limit=${PAGE_SIZE}`
+            );
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
           newEntries = (data || []).map(e => ({ ...e, ui_id: `riv-${e.id}`, _table: 'rivals', category: 'Rival' }));
         }
 
@@ -312,36 +357,85 @@ export default function App() {
   }, [activeMainTab, activeUmaTab, activeDormTab]);
 
   // --- 3. FETCH SPECIFIC TEAM MEMBERS (only once a team is actually clicked) ---
-  useEffect(() => {
-    const fetchTeamMembers = async () => {
-      if (activeMainTab !== 'Teams' || !selectedTeamId) return;
-      const teamEntries = entries.filter(e => e.category === 'Team');
-      const selectedTeam = teamEntries.find(e => e.ui_id === selectedTeamId);
-      if (!selectedTeam) return;
+    useEffect(() => {
+        const fetchTeamMembers = async () => {
+            if (activeMainTab !== 'Teams' || !selectedTeamId) return;
 
-      const cached = teamMembersCacheRef.current[selectedTeam.name];
-      if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
-        setTeamMembers(cached.data);
-        return;
-      }
-        
-      const [cRes, tRes] = await Promise.all([
-        supabase.from('characters').select(COLS.characters).eq('team_name', selectedTeam.name),
-        supabase.from('trainers').select(COLS.trainers).eq('team_name', selectedTeam.name)
-      ]);
-      if (cRes.error) console.error('Team members (characters) fetch error:', cRes.error.message, cRes.error);
-      if (tRes.error) console.error('Team members (trainers) fetch error:', tRes.error.message, tRes.error);
-      
-      const data = {
-        head: (tRes.data || []).filter(t => t.position === 'Head Trainer').map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position })),
-        assistant: (tRes.data || []).filter(t => t.position === 'Assistant Trainer').map(e => ({ ...e, ui_id: `trn-${e.id}`, _table: 'trainers', category: 'Trainer', submitter: e.discord_submitter, team: e.team_name, trainerRole: e.position })),
-        trainees: (cRes.data || []).map(e => ({ ...e, ui_id: `char-${e.id}`, _table: 'characters', category: 'Umamusume', trainer: e.trainer_name, team: e.team_name, type: e.type || 'Unassigned', dorm: e.dorm || 'Unassigned' }))
-      };
-      teamMembersCacheRef.current[selectedTeam.name] = { data, timestamp: Date.now() };
-      setTeamMembers(data);
-    };
-    fetchTeamMembers();
-  }, [selectedTeamId, activeMainTab, entries]);
+            const teamEntries = entries.filter(e => e.category === 'Team');
+            const selectedTeam = teamEntries.find(e => e.ui_id === selectedTeamId);
+
+            if (!selectedTeam) return;
+
+            const cached = teamMembersCacheRef.current[selectedTeam.name];
+
+            if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
+                setTeamMembers(cached.data);
+                return;
+            }
+
+            try {
+                const response = await fetch(
+                    `/api/teams/${encodeURIComponent(selectedTeam.name)}/members`
+                );
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                const teamMembersData = {
+                    head: (data.trainers || [])
+                        .filter(t => t.position === 'Head Trainer')
+                        .map(e => ({
+                            ...e,
+                            ui_id: `trn-${e.id}`,
+                            _table: 'trainers',
+                            category: 'Trainer',
+                            submitter: e.discord_submitter,
+                            team: e.team_name,
+                            trainerRole: e.position
+                        })),
+
+                    assistant: (data.trainers || [])
+                        .filter(t => t.position === 'Assistant Trainer')
+                        .map(e => ({
+                            ...e,
+                            ui_id: `trn-${e.id}`,
+                            _table: 'trainers',
+                            category: 'Trainer',
+                            submitter: e.discord_submitter,
+                            team: e.team_name,
+                            trainerRole: e.position
+                        })),
+
+                    trainees: (data.characters || [])
+                        .map(e => ({
+                            ...e,
+                            ui_id: `char-${e.id}`,
+                            _table: 'characters',
+                            category: 'Umamusume',
+                            trainer: e.trainer_name,
+                            team: e.team_name,
+                            type: e.type || 'Unassigned',
+                            dorm: e.dorm || 'Unassigned'
+                        }))
+                };
+
+                teamMembersCacheRef.current[selectedTeam.name] = {
+                    data: teamMembersData,
+                    timestamp: Date.now()
+                };
+
+                setTeamMembers(teamMembersData);
+            }
+            catch (error) {
+                console.error('Team members fetch error:', error);
+            }
+        };
+
+        fetchTeamMembers();
+    }, [selectedTeamId, activeMainTab, entries]);
 
   // --- 4. INFINITE SCROLL LISTENER ---
   const handleScroll = (e) => {
@@ -361,32 +455,50 @@ export default function App() {
   };
 
   const handleImageUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
+        const file = e.target.files[0];
+        if (!file) return;
+        const token = await getAccessToken();
 
-    try {
-      // Run every upload through the WebP pipeline first (see prepareImageForUpload above)
-      // before it ever reaches Supabase Storage, to cut both storage and egress.
-      const { blob, ext, contentType } = await prepareImageForUpload(file);
+        try {
+            // Run every upload through the WebP pipeline first.
+            const { blob, ext, contentType } = await prepareImageForUpload(file);
 
-      const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${ext}`;
-      const filePath = `public/${fileName}`;
+            const formData = new FormData();
 
-      const { error: uploadError } = await supabase.storage.from('images').upload(filePath, blob, {
-        contentType,
-        cacheControl: '31536000', // far-future cache header so repeat views don't re-pull the asset
-        upsert: false,
-      });
-      if (uploadError) throw uploadError;
+            formData.append(
+                'image',
+                blob,
+                `upload.${ext}`
+            );
 
-      // Grab the clean public URL and save it to the form
-      const { data: urlData } = supabase.storage.from('images').getPublicUrl(filePath);
-      setFormData(prev => ({ ...prev, imageBase64: urlData.publicUrl }));
-    } catch (err) {
-      console.error('Error uploading to bucket:', err.message);
-      setErrorMsg(`Failed to upload image: ${err.message}`);
-    }
-  };
+            const response = await fetch('/api/upload', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                },
+                body: formData
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            if (!data.success) {
+                throw new Error(data.error || 'Upload failed');
+            }
+
+            setFormData(prev => ({
+                ...prev,
+                imageBase64: data.url
+            }));
+        }
+        catch (err) {
+            console.error('Error uploading image:', err.message);
+            setErrorMsg(`Failed to upload image: ${err.message}`);
+        }
+    };
 
   const handleEditClick = (entry) => {
     setFormData({
@@ -400,43 +512,53 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleCancelEdit = () => {
-    setEditingId(null);
-    setFormData(prev => ({ ...prev, name: '', link: '', submitter: '', imageBase64: '', trainer: '', roommate: '', team: '', season: '', trainerRole: 'Head Trainer', password: '' }));
-    const fileInput = document.getElementById('file-upload');
-    if (fileInput) fileInput.value = '';
-    setErrorMsg('');
-  };
+    const handleCancelEdit = () => {
+        setEditingId(null);
+        setFormData(prev => ({ ...prev, name: '', link: '', submitter: '', imageBase64: '', trainer: '', roommate: '', team: '', season: '', trainerRole: 'Head Trainer' }));
+        const fileInput = document.getElementById('file-upload');
+        if (fileInput) fileInput.value = '';
+        setErrorMsg('');
+    };
 
-  const confirmDelete = async () => {
-    if (deleteModal.password !== generateDailyPassword()) {
-      setDeleteModal(prev => ({ ...prev, error: 'Invalid Password of the Day.' }));
-      return;
-    }
-    try {
-      const { error } = await supabase.from(deleteModal.dbTable).delete().eq('id', deleteModal.entryId);
-      if (error) throw error;
-      
-      setEntries(entries.filter(e => e.ui_id !== deleteModal.ui_id));
-      if (selectedTeamId === deleteModal.ui_id) setSelectedTeamId(null);
-      setDeleteModal({ isOpen: false, entryId: null, dbTable: null, ui_id: null, password: '', error: '' });
-      setSuccessMsg('Entry deleted successfully.');
-      setTimeout(() => setSuccessMsg(''), 3000);
-      invalidateCaches();
-      if (deleteModal.dbTable === 'teams') fetchTeamsList();
-    } catch (err) {
-      setDeleteModal(prev => ({ ...prev, error: 'Failed to delete row from database.' }));
-    }
-  };
+    const confirmDelete = async () => {
+        try {
+            const token = await getAccessToken();
+            const response = await fetch(
+                `/api/${deleteModal.dbTable}/${deleteModal.entryId}`,
+                {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                }
+            );
+
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const data = await response.json();
+            if (!data.success) throw new Error(data.error || 'Delete failed');
+
+            setEntries(entries.filter(e => e.ui_id !== deleteModal.ui_id));
+            if (selectedTeamId === deleteModal.ui_id) setSelectedTeamId(null);
+            setDeleteModal({ isOpen: false, entryId: null, dbTable: null, ui_id: null, error: '' });
+            setSuccessMsg('Entry deleted successfully.');
+            setTimeout(() => setSuccessMsg(''), 3000);
+            invalidateCaches();
+            if (deleteModal.dbTable === 'teams') fetchTeamsList();
+        } catch (err) {
+            setDeleteModal(prev => ({ ...prev, error: 'Failed to delete row from database.' }));
+        }
+    };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setErrorMsg(''); setSuccessMsg('');
+      setErrorMsg(''); setSuccessMsg('');
 
-    if (formData.password !== generateDailyPassword()) {
-      setErrorMsg('Invalid Password of the Day.');
-      return;
-    }
+      if (!isAuthenticated) {
+          setErrorMsg('Please sign in first.');
+          return;
+      }
+      const token = await getAccessToken();
 
     let targetTable = 'characters';
     let dbPayload = {};
@@ -466,19 +588,65 @@ export default function App() {
     }
 
     try {
-      if (editingId) {
-        const existingEntry = entries.find(e => e.ui_id === editingId);
-        const { error } = await supabase.from(existingEntry._table).update(dbPayload).eq('id', existingEntry.id);
-        if (error) throw error;
-        setSuccessMsg('Entry updated successfully!');
-        setEditingId(null);
-      } else {
-        const { error } = await supabase.from(targetTable).insert([dbPayload]).select();
-        if (error) throw error;
-        setSuccessMsg(`${formData.name} added to database!`);
+        if (editingId) {
+            const existingEntry = entries.find(e => e.ui_id === editingId);
+
+            if (!existingEntry) {
+                throw new Error('Could not find entry being edited.');
+            }
+
+            const response = await fetch(
+                `/api/${existingEntry._table}/${existingEntry.id}`,
+                {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${token}`
+                    },
+                    body: JSON.stringify(dbPayload)
+                }
+            );
+
+              if (!response.ok) {
+                  throw new Error(`HTTP ${response.status}`);
+              }
+
+              const data = await response.json();
+
+              if (!data.success) {
+                  throw new Error(data.error || 'Update failed');
+              }
+
+              setSuccessMsg('Entry updated successfully!');
+              setEditingId(null);
+          }
+          else{
+              const response = await fetch(
+                  `/api/${targetTable}`,
+                  {
+                      method: 'POST',
+                      headers: {
+                          'Content-Type': 'application/json',
+                          'Authorization': `Bearer ${token}`
+                      },
+                      body: JSON.stringify(dbPayload)
+                  }
+              );
+
+              if (!response.ok) {
+                  throw new Error(`HTTP ${response.status}`);
+              }
+
+              const data = await response.json();
+
+              if (!data.success) {
+                  throw new Error(data.error || 'Insert failed');
+              }
+
+              setSuccessMsg(`${formData.name} added to database!`);
       }
 
-      setFormData(prev => ({ ...prev, name: '', link: '', submitter: '', imageBase64: '', trainer: '', roommate: '', team: '', season: '', password: '' }));
+      setFormData(prev => ({ ...prev, name: '', link: '', submitter: '', imageBase64: '', trainer: '', roommate: '', team: '', season: '' }));
       const fileInput = document.getElementById('file-upload');
       if (fileInput) fileInput.value = '';
       setTimeout(() => setSuccessMsg(''), 3000);
@@ -492,16 +660,19 @@ export default function App() {
   };
 
   // --- 6. RENDER HELPERS ---
-  const AdminControls = ({ entry }) => (
-    <div className="absolute top-2 right-2 flex gap-1 bg-white/90 p-1 rounded-lg border border-slate-200 backdrop-blur shadow-md opacity-0 group-hover:opacity-100 transition-opacity z-10">
-      <button onClick={(e) => { e.stopPropagation(); handleEditClick(entry); }} className="p-1.5 text-blue-600 hover:text-blue-500 hover:bg-slate-100 rounded transition-colors" title="Edit">
-        <EditIcon />
-      </button>
-      <button onClick={(e) => { e.stopPropagation(); setDeleteModal({isOpen: true, entryId: entry.id, dbTable: entry._table, ui_id: entry.ui_id, password: '', error: ''}); }} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-slate-100 rounded transition-colors" title="Delete">
-        <TrashIcon />
-      </button>
-    </div>
-  );
+    const AdminControls = ({ entry }) => {
+        if (!isAuthenticated) return null;
+        return (
+            <div className="absolute top-2 right-2 flex gap-1 bg-white/90 p-1 rounded-lg border border-slate-200 backdrop-blur shadow-md opacity-0 group-hover:opacity-100 transition-opacity z-10">
+                <button onClick={(e) => { e.stopPropagation(); handleEditClick(entry); }} className="p-1.5 text-blue-600 hover:text-blue-500 hover:bg-slate-100 rounded transition-colors" title="Edit">
+                    <EditIcon />
+                </button>
+                <button onClick={(e) => { e.stopPropagation(); setDeleteModal({ isOpen: true, entryId: entry.id, dbTable: entry._table, ui_id: entry.ui_id, error: '' }); }} className="p-1.5 text-red-500 hover:text-red-400 hover:bg-slate-100 rounded transition-colors" title="Delete">
+                    <TrashIcon />
+                </button>
+            </div>
+        );
+    };
 
   const getAccentColor = (entry) => {
     if (entry.category === 'Umamusume') return entry.type === 'Canon' ? 'bg-[#ff4da6]' : (entry.type === 'OC' ? 'bg-[#00d182]' : 'bg-[#8b5cf6]');
@@ -741,11 +912,20 @@ export default function App() {
             />
           </div>
         </div>
-        <div className="flex items-center gap-2 sm:gap-4">
-          <a href="#" className="px-3 sm:px-6 py-1.5 bg-white text-[#1942d8] font-bold italic rounded shadow-[2px_2px_0px_#122b94] hover:-translate-y-0.5 hover:shadow-[3px_3px_0px_#122b94] transition-all text-xs sm:text-base">
-            Mastersheet
-          </a>
-        </div>
+              <div className="flex items-center gap-2 sm:gap-4">
+                  <a href="#" className="px-3 sm:px-6 py-1.5 bg-white text-[#1942d8] font-bold italic rounded shadow-[2px_2px_0px_#122b94] hover:-translate-y-0.5 hover:shadow-[3px_3px_0px_#122b94] transition-all text-xs sm:text-base">
+                      Mastersheet
+                  </a>
+                  {isAuthenticated ? (
+                      <button onClick={handleLogout} className="px-3 sm:px-6 py-1.5 bg-white/10 text-white font-bold italic rounded border border-white/40 hover:bg-white/20 transition-colors text-xs sm:text-base">
+                          Sign out{accounts[0]?.name ? ` (${accounts[0].name})` : ''}
+                      </button>
+                  ) : (
+                      <button onClick={handleLogin} className="px-3 sm:px-6 py-1.5 bg-white/10 text-white font-bold italic rounded border border-white/40 hover:bg-white/20 transition-colors text-xs sm:text-base">
+                          Sign in
+                      </button>
+                  )}
+              </div>
       </header>
 
       <div className="max-w-[1600px] mx-auto grid grid-cols-1 lg:grid-cols-4 gap-8 px-4 sm:px-6">
@@ -760,9 +940,16 @@ export default function App() {
             <div className="mb-6 p-3 bg-blue-50 border border-blue-200 rounded flex items-center gap-3 shadow-inner">
                 <img src={umautoImg} alt="Welcome Mascot" className="w-10 h-10 object-contain shrink-0 rounded" />
                 <span className="font-bold text-sm text-blue-800">Welcome to Grand Gallop's Mastersheet, Have a nice read!</span>
-            </div>
-
-            <form onSubmit={handleSubmit} className="space-y-4">
+                      </div>
+                      {!isAuthenticated ? (
+                          <div className="text-center py-10">
+                              <p className="text-slate-500 font-bold mb-4">Sign in to add or edit entries.</p>
+                              <button onClick={handleLogin} className="bg-[#1942d8] hover:bg-[#3b72ff] text-white font-black italic py-3 px-6 rounded shadow-md">
+                                  Sign in with Microsoft
+                              </button>
+                          </div>
+                      ) : (
+                          <form onSubmit={handleSubmit} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Entry Category</label>
                 <select name="category" value={formData.category} onChange={handleInputChange} disabled={!!editingId} className="w-full bg-slate-50 border-2 border-slate-200 rounded p-2 text-slate-800 font-bold focus:border-[#1942d8] outline-none disabled:opacity-50">
@@ -861,11 +1048,6 @@ export default function App() {
                 <p className="text-[10px] text-slate-400 mt-1">Images are automatically converted to WebP (and resized) before upload to keep storage/egress low. Animated GIFs are kept as GIF so the animation isn't lost.</p>
               </div>
 
-              <div className="pt-4 border-t-2 border-slate-100">
-                <label className="block text-xs font-bold text-[#ff4da6] uppercase tracking-wider mb-1">Daily Password</label>
-                <input type="password" name="password" value={formData.password} onChange={handleInputChange} required className="w-full bg-white border-2 border-pink-200 rounded p-2 text-slate-800 font-medium focus:border-[#ff4da6] outline-none" />
-              </div>
-
               {errorMsg && <p className="text-[#ff3b3b] text-sm mt-2 font-bold">{errorMsg}</p>}
               {successMsg && <p className="text-[#00d182] text-sm mt-2 font-bold">{successMsg}</p>}
 
@@ -879,7 +1061,8 @@ export default function App() {
                   {editingId ? 'Update Entry' : 'Upload Data'}
                 </button>
               </div>
-            </form>
+                          </form>
+                      )}
           </div>
         </div>
 
@@ -923,30 +1106,22 @@ export default function App() {
         </div>
       </div>
 
-      {deleteModal.isOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
-            <div className="bg-white p-6 rounded-xl border-t-8 border-[#ff3b3b] shadow-2xl w-full max-w-md">
-                <h3 className="text-2xl font-black italic text-slate-800 mb-2 flex items-center gap-2">
-                    <span className="w-3 h-6 bg-[#ff3b3b] inline-block -skew-x-12"></span>
-                    Confirm Deletion
-                </h3>
-                <p className="text-sm text-slate-600 mb-6 font-medium">Are you sure you want to permanently delete this entry? This action cannot be undone.</p>
-                <label className="block text-xs font-bold text-[#ff4da6] uppercase tracking-wider mb-1">Authorize (Daily Password)</label>
-                <input
-                    type="password"
-                    placeholder="Enter today's password"
-                    value={deleteModal.password}
-                    onChange={e => setDeleteModal({...deleteModal, password: e.target.value})}
-                    className="w-full bg-slate-50 border-2 border-slate-200 focus:border-[#ff3b3b] outline-none rounded p-3 text-slate-800 mb-2 font-bold"
-                />
-                {deleteModal.error && <p className="text-[#ff3b3b] text-sm mb-4 font-bold">{deleteModal.error}</p>}
-                <div className="flex justify-end gap-3 mt-6">
-                    <button onClick={() => setDeleteModal({isOpen: false, entryId: null, dbTable: null, ui_id: null, password: '', error: ''})} className="px-5 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded font-black italic transition-colors">Cancel</button>
-                    <button onClick={confirmDelete} className="px-5 py-2 bg-[#ff3b3b] hover:bg-red-600 text-white rounded font-black italic transition-colors shadow-md">Permanently Delete</button>
-                </div>
-            </div>
-        </div>
-      )}
+          {deleteModal.isOpen && (
+              <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
+                  <div className="bg-white p-6 rounded-xl border-t-8 border-[#ff3b3b] shadow-2xl w-full max-w-md">
+                      <h3 className="text-2xl font-black italic text-slate-800 mb-2 flex items-center gap-2">
+                          <span className="w-3 h-6 bg-[#ff3b3b] inline-block -skew-x-12"></span>
+                          Confirm Deletion
+                      </h3>
+                      <p className="text-sm text-slate-600 mb-6 font-medium">Are you sure you want to permanently delete this entry? This action cannot be undone.</p>
+                      {deleteModal.error && <p className="text-[#ff3b3b] text-sm mb-4 font-bold">{deleteModal.error}</p>}
+                      <div className="flex justify-end gap-3 mt-6">
+                          <button onClick={() => setDeleteModal({ isOpen: false, entryId: null, dbTable: null, ui_id: null, error: '' })} className="px-5 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded font-black italic transition-colors">Cancel</button>
+                          <button onClick={confirmDelete} className="px-5 py-2 bg-[#ff3b3b] hover:bg-red-600 text-white rounded font-black italic transition-colors shadow-md">Permanently Delete</button>
+                      </div>
+                  </div>
+              </div>
+          )}
     </div>
   );
 }
